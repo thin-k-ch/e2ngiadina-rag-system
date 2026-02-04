@@ -103,6 +103,10 @@ services:
       - WEBUI_SECRET_KEY=your-secret-key-here
       - DEFAULT_MODELS=agentic-rag
       - PORT=8086
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - ENABLE_OLLAMA_API=true
+      - SHOW_OLLAMA_MODELS=true
     depends_on:
       - agent_api
+      - ollama
     restart: unless-stopped
