@@ -40,10 +40,12 @@ services:
       - NOTES_MAX_TOKENS=600
       - SUMMARY_UPDATE_TRIGGER_TOKENS=9000
       - STATE_PATH=/state
+      - FILE_BASE=/media/felix/RAG/1
     volumes:
       - ./volumes/chroma:/chroma
       - ./volumes/logs:/logs
       - ./volumes/state:/state
+      - /media/felix/RAG/1:/media/felix/RAG/1
     depends_on:
       - ollama
       - runner
@@ -106,14 +108,17 @@ services:
     ports:
       - "8086:8086"
     environment:
-      - OPENAI_API_BASE_URL=http://agent_api:11436/v1
-      - OPENAI_API_KEY=sk-empty-key
-      - WEBUI_SECRET_KEY=your-secret-key-here
-      - DEFAULT_MODELS=agentic-rag
-      - PORT=8086
+      # Ollama direkt (für Standard-Modelle)
       - OLLAMA_BASE_URL=http://ollama:11434
-      - ENABLE_OLLAMA_API=false
-      - SHOW_OLLAMA_MODELS=false
+      - ENABLE_OLLAMA_API=true
+      - SHOW_OLLAMA_MODELS=true
+      # OpenAI-compatible zusätzliche API(s) - unser agentic-rag
+      - OPENAI_API_BASE_URLS=http://agent_api:11436/v1
+      - OPENAI_API_KEYS=local
+      # Allgemeine Settings
+      - WEBUI_SECRET_KEY=your-secret-key-here
+      - DEFAULT_MODELS=agentic-rag,llama4:latest
+      - PORT=8086
     depends_on:
       - agent_api
       - ollama

@@ -1,3 +1,6 @@
+import os
+from .format_links import to_file_url, make_clickable_path
+
 def group_by_file(hits: list, key="original_path"):
     groups = {}
     for h in hits:
@@ -39,6 +42,13 @@ def build_evidence_pack(hits: list, max_sources: int = 6, max_chars_per_source: 
         if not taken:
             continue
         idx = len(sources) + 1
-        sources.append({"n": idx, "path": p})
+        file_base = os.getenv("FILE_BASE","")
+        display_path, url = make_clickable_path(p, file_base if file_base else None, use_http_proxy=True)
+        sources.append({
+          "n": idx,
+          "path": p,
+          "display_path": display_path,
+          "local_url": url
+        })
         lines.append(f"[{idx}] {p}\n" + "\n---\n".join(taken))
     return "\n\n".join(lines), sources

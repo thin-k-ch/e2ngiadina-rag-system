@@ -2,6 +2,7 @@ import os
 import time
 import hashlib
 from fastapi import FastAPI, Header, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .agent import Agent
@@ -41,6 +42,31 @@ def models():
         "object": "list",
         "data": [{"id": "agentic-rag", "object": "model", "created": 0, "owned_by": "local"}]
     }
+
+@app.get("/open")
+async def open_file(path: str):
+    """
+    File proxy endpoint to serve local files via HTTP
+    Security: Only serves files under FILE_BASE if set
+    """
+    file_base = os.getenv("FILE_BASE", "")
+    
+    # Security check: only allow files under base directory
+    if file_base and not path.startswith(file_base):
+        return {"error": "Access denied - path outside base directory"}
+    
+    # Normalize path
+    normalized_path = os.path.normpath(path)
+    
+    # Check if file exists
+    if not os.path.exists(normalized_path):
+        return {"error": "File not found"}
+    
+    # Check if it's a file (not directory)
+    if not os.path.isfile(normalized_path):
+        return {"error": "Path is not a file"}
+    
+    return FileResponse(normalized_path)
 
 @app.post("/v1/chat/completions")
 async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = Header(default=None)):

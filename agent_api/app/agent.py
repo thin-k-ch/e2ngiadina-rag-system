@@ -5,7 +5,7 @@ import hashlib
 from typing import List, Dict, Tuple
 
 from .tools import Tools
-from .query_planner import plan_queries
+from .query_planner import plan_queries, refine_queries
 from .rerank import rerank
 from .evidence import build_evidence_pack
 
@@ -43,7 +43,10 @@ nutze Retrieval,
 lies Belege,
 beantworte ausschließlich aus Belegen.
 Wenn Belege fehlen: sage exakt "Nicht in den Dokumenten gefunden."
-Sprache: Deutsch (außer Nutzer verlangt Englisch).
+
+SPRACHE:
+Antworte standardmäßig auf Deutsch.
+Wenn Nutzer explizit Englisch verlangt ("in english", "auf englisch") -> antworte Englisch.
 
 Output format requirement:
 - You MAY include a private notes block wrapped in:
@@ -77,6 +80,26 @@ def strip_notes(model_output: str) -> Tuple[str, str]:
     notes = m.group(1).strip() if m else ""
     answer = re.sub(r"<NOTES>.*?</NOTES>", "", model_output, flags=re.DOTALL | re.IGNORECASE).strip()
     return notes, answer
+
+def _hits_preview(hits, n=5):
+    lines=[]
+    for i,h in enumerate(hits[:n],1):
+        md=h.get("metadata") or {}
+        p=md.get("original_path") or md.get("file_path") or "unknown"
+        sn=(h.get("text") or "").replace("\n"," ")[:160]
+        lines.append(f"{i}. {p} — {sn} …")
+    return "\n".join(lines)
+
+def _weak_evidence(hits):
+    # simple gate: too few hits or all distances bad (if present)
+    if not hits or len(hits) < 3:
+        return True
+    dists=[h.get("distance") for h in hits if h.get("distance") is not None]
+    if dists:
+        # Chroma distance: lower better; >1.2 often weak in many setups
+        if min(dists) > 1.2:
+            return True
+    return False
 
 class Agent:
     def __init__(self):
@@ -165,21 +188,55 @@ class Agent:
         """
         # AGENTIC LOOP: PLAN → RETRIEVE → RERANK → EVIDENCE → ANSWER/EXTRACT
         plan = await plan_queries(self.llm, user_text)
+        mode = plan.get("mode","rag")
         queries = plan["queries"]
         must_include = plan.get("must_include", [])
-        mode = plan.get("mode","rag")
 
-        hits = self.tools.search_multi(queries, top_k_each=8, max_total=24)
-        hits = self.tools.filter_must_include(hits, must_include)
+        final_hits = []
+        final_context = ""
+        final_sources = []
 
-        if not hits:
+        for attempt in range(2):  # max 2 iterations
+            hits = self.tools.search_multi(queries, top_k_each=8, max_total=30)
+            hits = self.tools.filter_must_include(hits, must_include)
+            if hits:
+                hits = rerank(queries[0], hits, top_n=12)
+                context, sources = build_evidence_pack(hits, max_sources=6, max_chars_per_source=1600)
+            else:
+                context, sources = "", []
+
+            # if good enough: break
+            if hits and not _weak_evidence(hits):
+                final_hits, final_context, final_sources = hits, context, sources
+                break
+
+            # attempt 0 -> refine based on preview and retry
+            if attempt == 0:
+                preview = _hits_preview(hits, n=5) if hits else "NO HITS"
+                plan2 = await refine_queries(self.llm, user_text, preview)
+                mode = plan2.get("mode", mode)
+                # merge new queries + keep old first
+                newq = plan2.get("queries", [])
+                merged=[]
+                for q in (queries + newq):
+                    q=(q or "").strip()
+                    if q and q not in merged:
+                        merged.append(q)
+                queries = merged[:12]
+                must_include = plan2.get("must_include", must_include)
+                continue
+
+        # if still nothing:
+        if not final_hits:
             return ("Nicht in den Dokumenten gefunden.", summary, notes)
 
-        # rerank using best query (first)
-        hits = rerank(queries[0], hits, top_n=10)
+        # OPTIONAL: Wenn attempt 2 immer noch weak evidence, dann lieber "nicht gefunden"
+        if _weak_evidence(final_hits):
+            return ("Nicht in den Dokumenten gefunden.", summary, notes)
 
-        # build evidence pack (expand-ish by grouping)
-        context, sources = build_evidence_pack(hits, max_sources=6, max_chars_per_source=1600)
+        # now answer using final_context
+        context = final_context
+        hits = final_hits
 
         # enforce: no "kein zugriff" and no hallucination
         user_task = user_text.strip()
@@ -216,5 +273,18 @@ class Agent:
             out3 = await self.llm(messages, temperature=0.1)
             _, a3 = strip_notes(out3)
             answer = (a3 or "").strip()
+
+        # Add clickable file:// links to sources
+        if final_sources:
+            src_lines = []
+            for s in final_sources:
+                n = s.get("n")
+                display_path = s.get("display_path", s.get("path", ""))
+                url = s.get("local_url","")
+                if url and display_path:
+                    src_lines.append(f"[{n}] [{display_path}]({url})")
+                else:
+                    src_lines.append(f"[{n}] {display_path}")
+            answer = answer.rstrip() + "\n\nQuellen (lokal):\n" + "\n\n".join(src_lines)
 
         return (answer, summary, notes)
