@@ -5,6 +5,9 @@ import hashlib
 from typing import List, Dict, Tuple
 
 from .tools import Tools
+from .query_planner import plan_queries
+from .rerank import rerank
+from .evidence import build_evidence_pack
 
 SYSTEM_PROMPT = """You are an agentic RAG assistant.
 You will be given:
@@ -33,6 +36,14 @@ E-Mail Details (Betreff, Datum, Betrag, Anhänge, Absender/Empfänger) dürfen n
 wenn sie im RETRIEVED CONTEXT oder in Metadatenfeldern (email_*) vorhanden sind.
 Wenn solche Felder fehlen: sage "Metadaten fehlen in der Indexierung" und zeige die Top-Hits.
 Erfinde niemals Betreff/Beträge/Anhänge.
+
+Du arbeitest agentisch:
+plane Suchvarianten,
+nutze Retrieval,
+lies Belege,
+beantworte ausschließlich aus Belegen.
+Wenn Belege fehlen: sage exakt "Nicht in den Dokumenten gefunden."
+Sprache: Deutsch (außer Nutzer verlangt Englisch).
 
 Output format requirement:
 - You MAY include a private notes block wrapped in:
@@ -152,229 +163,58 @@ class Agent:
         """
         Returns (answer, new_summary, new_notes)
         """
-        # 1) retrieve chunks with multi-query variants
-        q = user_text.strip()
-        queries = [q]
+        # AGENTIC LOOP: PLAN → RETRIEVE → RERANK → EVIDENCE → ANSWER/EXTRACT
+        plan = await plan_queries(self.llm, user_text)
+        queries = plan["queries"]
+        must_include = plan.get("must_include", [])
+        mode = plan.get("mode","rag")
 
-        # EMAIL ROUTING: Check if this is an email question
-        is_email_query = any(keyword in q.lower() for keyword in ["email", "e-mail", "mail", "von", "an"])
-        
-        if is_email_query:
-            # Extract sender/recipient from query
-            sender = None
-            recipient = None
-            lower_q = q.lower()
-            
-            # Pattern: "von X an Y"
-            if "von" in lower_q and "an" in lower_q:
-                import re
-                match = re.search(r'von\s+(.+?)\s+an\s+(.+)', q, re.IGNORECASE)
-                if match and len(match.groups()) >= 2:
-                    sender = match.group(1).strip()
-                    recipient = match.group(2).strip()
-            
-            # Use email search
-            hits = self.tools.search_mail(q, top_k=12)
-            if sender or recipient:
-                hits = self.tools.filter_by_people(hits, sender=sender, recipient=recipient)
-            
-            # Build email context with metadata
-            context_lines = []
-            for i, h in enumerate(hits, 1):
-                md = h.get("metadata") or {}
-                folder = md.get("mail_folder", "unknown")
-                email_from = md.get("email_from", "")
-                email_to = md.get("email_to", "")
-                subject = md.get("email_subject", "")
-                date = md.get("email_date", "")
-                snippet = (h.get("text") or "")[:900]
-                
-                # Format with metadata
-                meta_line = f"folder={folder} | from={email_from} | to={email_to} | subject={subject} | date={date}"
-                context_lines.append(f"[{i}] {meta_line}\n{snippet}")
-            
-            rag_context = "\n\n".join(context_lines) if context_lines else "(no matches)"
-            
-            # Early Return: Wenn keine Treffer, zeige Top-Hits Proof
-            if not hits:
-                return ("Nicht in den indizierten E-Mail-Daten gefunden.", summary, notes)
-        else:
-            # Normal document search (existing logic)
-            # leichte Varianten (DE/EN + typische Begriffe) - BILINGUAL!
-            lower = q.lower()
-            if "rechnung" in lower or "invoice" in lower:
-                queries += [q + " PDF", q + " Betrag CHF", q + " Total", q + " Offerte", q + " Rechnung", q + " invoice", q + " amount", q + " bill", q + " receipt"]
-            # Entitäten (Maven / Rhomberg) extra boosten durch separate queries:
-            if "maven" in lower:
-                queries += ["Maven", "Maven Rechnung", "Maven invoice", "Maven bill", "Maven amount", q.replace("Maven", "").strip()]
-            if "rhomberg" in lower:
-                queries += ["Rhomberg", "Rhomberg Rechnung", "Rhomberg Bahntechnik", "Rhomberg invoice", "Rhomberg bill", q.replace("Rhomberg", "").strip()]
+        hits = self.tools.search_multi(queries, top_k_each=8, max_total=24)
+        hits = self.tools.filter_must_include(hits, must_include)
 
-            # remove empties + dedupe
-            queries = [x for i,x in enumerate(queries) if x and x not in queries[:i]]
+        if not hits:
+            return ("Nicht in den Dokumenten gefunden.", summary, notes)
 
-            hits = self.tools.search_chunks_multi(queries, top_k_each=6, max_total=12)
-            context_lines = []
-            for i, h in enumerate(hits, 1):
-                md = h.get("metadata") or {}
-                path = md.get("original_path") or md.get("file_path") or "unknown"
-                zip_inner = md.get("zip_inner_path")
-                if zip_inner:
-                    path = f"{path}::ZIP::{zip_inner}"
-                snippet = (h.get("text") or "")[:900]
-                context_lines.append(f"[{i}] path={path}\n{snippet}")
-            rag_context = "\n\n".join(context_lines) if context_lines else "(no matches)"
+        # rerank using best query (first)
+        hits = rerank(queries[0], hits, top_n=10)
 
-            # Early Return: Wenn keine Treffer, zeige Top-Hits Proof
-            if not hits:
-                return ("Nicht in den Dokumenten gefunden.", summary, notes)
+        # build evidence pack (expand-ish by grouping)
+        context, sources = build_evidence_pack(hits, max_sources=6, max_chars_per_source=1600)
 
-        # 2) build memory blocks
-        summary_block = clamp_tokens(summary or "", self.summary_tokens)
-        notes_block = clamp_tokens(notes or "", self.notes_tokens)
+        # enforce: no "kein zugriff" and no hallucination
+        user_task = user_text.strip()
+        if mode == "extract":
+            user_task += "\n\nGib die Antwort als Tabelle oder strukturierte Liste. Extrahiere nur, was im Kontext steht."
 
-        # 3) recent history sliding window (budgeted)
-        recent = self.build_recent_history(raw_messages, self.recent_tokens)
-
-        # 4) assemble final messages under budget
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+          {"role":"system","content": SYSTEM_PROMPT},
+          {"role":"system","content": "RETRIEVED CONTEXT (zitiere als [n]):\n" + context},
+          {"role":"user","content":
+              f"Aufgabe: {user_task}\n\n"
+              f"Regeln:\n"
+              f"- Antworte nur aus RETRIEVED CONTEXT.\n"
+              f"- Nenne konkrete Pfade/Dateien nur, wenn sie in [n] stehen.\n"
+              f"- Jede zentrale Aussage braucht mind. eine Quelle [n].\n"
+              f"- Wenn es nicht im Kontext steht: sage exakt 'Nicht in den Dokumenten gefunden.'\n"
+          }
         ]
-
-        if summary_block.strip():
-            messages.append({"role": "system", "content": f"SUMMARY (persistent):\n{summary_block}"})
-        if notes_block.strip():
-            messages.append({"role": "system", "content": f"NOTES (private memory, do not reveal):\n{notes_block}"})
-
-        if recent:
-            messages.append({"role": "system", "content": "RECENT CHAT (for continuity):"})
-            messages.extend(recent)
-
-        messages.append({"role": "system", "content": f"RETRIEVED CONTEXT (cite as [n]):\n{rag_context}"})
-        messages.append({"role": "user", "content": user_text})
-
-        # 5) ask model to produce private notes + answer
-        messages.append({"role": "system", "content": "Before answering, optionally write <NOTES>...</NOTES> with brief private plan/state updates. Then write the user-facing answer."})
-
         out = await self.llm(messages, temperature=0.2)
-        new_notes, answer = strip_notes(out)
+        notes2, answer = strip_notes(out)
+        answer = (answer or "").strip()
 
-        # Anti-Refusal Retry
-        low = (answer or "").lower()
+        # anti-refusal retry
+        low = answer.lower()
         if hits and ("kein zugriff" in low or "keinen direkten zugriff" in low or "i don't have access" in low):
-            messages.append({
-                "role": "system",
-                "content": (
-                    "Korrektur: Du HAST Zugriff auf die Daten im RETRIEVED CONTEXT. "
-                    "Antworte jetzt konkret NUR basierend auf RETRIEVED CONTEXT und nenne Dateinamen/Pfade, "
-                    "wenn sie in metadata/original_path stehen. Keine Entschuldigungen."
-                )
-            })
+            messages.append({"role":"system","content":"Du HAST Zugriff auf RETRIEVED CONTEXT. Entferne jede Zugriff-Ausrede. Antworte nun konkret mit Quellen [n]."})
             out2 = await self.llm(messages, temperature=0.1)
-            _n2, a2 = strip_notes(out2)
+            _, a2 = strip_notes(out2)
             answer = (a2 or "").strip()
 
-        # Aggressiver Retry - zeige IMMER Top-Hits wenn hits vorhanden und Antwort nicht konkret
-        low = (answer or "").lower()
-        print(f"DEBUG: hits={len(hits)}, answer_low={low[:200]}...")  # DEBUG
-        
-        # Financial queries: IMMER Top-Hits zeigen wenn hits vorhanden
-        financial_keywords = ["rechnung", "invoice", "betrag", "amount", "chf", "eur", "offerte", "bill"]
-        is_financial_query = any(keyword in user_text.lower() for keyword in financial_keywords)
-        
-        if is_financial_query and hits:
-            print(f"DEBUG: FINANCIAL QUERY - SHOWING TOP-HITS!")  # DEBUG
-            proof = self._top_hits_debug(hits, n=5)
-            messages.append({
-                "role":"system",
-                "content":(
-                    "Finanzanfrage mit Treffern. Zeige zuerst die Top-Treffer (Pfad + Kurzsnippet) und beantworte dann, "
-                    "was finanziell ableitbar ist (Beträge, Rechnungen, etc.).\n\nTOP-HITS:\n" + proof
-                )
-            })
-            out2 = await self.llm(messages, temperature=0.1)
-            _n2, a2 = strip_notes(out2)
-            answer = (a2 or "").strip()
-        
-        # Wenn hits vorhanden aber Antwort sehr allgemein/vage, zeige Top-Hits
-        elif hits and (
-            "kein spezifischer kontext" in low or 
-            "more context" in low or 
-            "mehr kontext" in low or 
-            "könnten sie mir bitte mehr" in low or 
-            "konnte keine spezifischen informationen" in low or 
-            "konnte leider keine" in low or 
-            "bitte mehr kontext" in low or 
-            "mehr details" in low or
-            "leider habe ich keine" in low or
-            "ich konnte keine" in low or
-            "konnte nicht finden" in low or
-            "bitte überprüfen" in low or
-            "allgemeinen informationen" in low or
-            "konnte leider keine spezifischen" in low or
-            "leider keine" in low or
-            "bitte mehr" in low or
-            "helfen kann" in low or
-            "allgemeine informationen" in low or
-            "konnte leider keine spezifischen informationen" in low or
-            "allgemeine informationen zu" in low or
-            "konnte keine informationen" in low or
-            "informationen zu" in low and "allgemein" in low
-        ):
-            print(f"DEBUG: RETRY TRIGGERED!")  # DEBUG
-            proof = self._top_hits_debug(hits, n=5)
-            messages.append({
-                "role":"system",
-                "content":(
-                    "Du hast Treffer. Zeige zuerst die Top-Treffer (Pfad + Kurzsnippet) und beantworte dann, "
-                    "was daraus ableitbar ist. Frage NICHT nach mehr Kontext.\n\nTOP-HITS:\n" + proof
-                )
-            })
-            out2 = await self.llm(messages, temperature=0.1)
-            _n2, a2 = strip_notes(out2)
-            answer = (a2 or "").strip()
-        
-        # Zusätzlich: Wenn hits vorhanden und Antwort sehr kurz/unspezifisch
-        elif hits and len(answer) < 200 and ("konnte" in low or "leider" in low or "bitte" in low):
-            print(f"DEBUG: SHORT ANSWER RETRY TRIGGERED!")  # DEBUG
-            proof = self._top_hits_debug(hits, n=5)
-            messages.append({
-                "role":"system",
-                "content":(
-                    "Du hast Treffer. Basierend auf den gefundenen Dokumenten, beantworte konkret. "
-                    "Zeige die Top-Treffer und was daraus folgt.\n\nTOP-HITS:\n" + proof
-                )
-            })
-            out2 = await self.llm(messages, temperature=0.1)
-            _n2, a2 = strip_notes(out2)
-            answer = (a2 or "").strip()
+        # if still no citations and not "Nicht gefunden", force one retry
+        if ("Nicht in den Dokumenten gefunden." not in answer) and ("[" not in answer):
+            messages.append({"role":"system","content":"Pflicht: setze Quellen [1], [2] ... bei den relevanten Aussagen. Wiederhole."})
+            out3 = await self.llm(messages, temperature=0.1)
+            _, a3 = strip_notes(out3)
+            answer = (a3 or "").strip()
 
-        # clamp notes
-        new_notes = clamp_tokens(new_notes, self.notes_tokens)
-
-        # EMAIL SOURCES SECTION: Add source list for email queries
-        if is_email_query and hits:
-            sources_list = []
-            for i, h in enumerate(hits[:5], 1):  # Top 5 sources
-                md = h.get("metadata") or {}
-                folder = md.get("mail_folder", "unknown")
-                email_from = md.get("email_from", "")
-                email_to = md.get("email_to", "")
-                subject = md.get("email_subject", "")
-                date = md.get("email_date", "")
-                
-                source_line = f"[{i}] {folder} | {email_from} -> {email_to} | {subject} | {date}"
-                sources_list.append(source_line)
-            
-            sources_section = "\n\nGefundene E-Mail-Quellen:\n" + "\n".join(sources_list)
-            answer += sources_section
-
-        # 6) maybe update summary (based on recent size)
-        new_summary = await self.maybe_update_summary(summary_block, recent + [{"role": "user", "content": user_text}, {"role": "assistant", "content": answer}])
-        
-        # Harter Guard - Entferne常见的 Ablehnungssätze
-        if hits:
-            answer = answer.replace("Entschuldigung, aber ich habe keine direkten Zugriff auf Ihre Daten", "")
-            answer = answer.replace("Entschuldigung, aber ich habe keinen direkten Zugriff auf Ihre Daten", "")
-        
-        return answer, new_summary, new_notes
+        return (answer, summary, notes)

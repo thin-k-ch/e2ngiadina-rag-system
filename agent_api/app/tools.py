@@ -112,6 +112,35 @@ class Tools:
             if ok: out.append(h)
         return out
 
+    def search_multi(self, queries: list[str], top_k_each: int = 8, max_total: int = 24):
+        seen=set()
+        merged=[]
+        for q in queries:
+            for h in self.search_chunks(q, top_k=top_k_each):
+                hid=h.get("id")
+                if not hid or hid in seen:
+                    continue
+                seen.add(hid)
+                merged.append(h)
+        return merged[:max_total]
+
+    def filter_must_include(self, hits: list, must_include: list[str]):
+        if not must_include:
+            return hits
+        mi=[m.lower() for m in must_include if m]
+        out=[]
+        for h in hits:
+            t=(h.get("text") or "").lower()
+            md=h.get("metadata") or {}
+            p=(md.get("original_path") or md.get("file_path") or "").lower()
+            ok=True
+            for m in mi:
+                if m not in t and m not in p:
+                    ok=False; break
+            if ok:
+                out.append(h)
+        return out
+
     async def python_exec(self, code: str, locals: dict | None = None):
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.post(self.runner_url, json={"code": code, "locals": locals or {}})
