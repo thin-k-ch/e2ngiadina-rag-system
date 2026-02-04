@@ -1,0 +1,48 @@
+import time
+from fastapi import FastAPI
+from pydantic import BaseModel
+from .agent import Agent
+
+app = FastAPI(title="AGENTIC RAG API (OpenAI-compatible subset)")
+agent = Agent()
+
+class Message(BaseModel):
+    role: str
+    content: str
+
+class ChatReq(BaseModel):
+    model: str | None = None
+    messages: list[Message]
+    stream: bool | None = False
+
+@app.get("/health")
+def health():
+    return {"ok": True, "service": "agent_api", "time": int(time.time())}
+
+@app.get("/v1/models")
+def models():
+    return {
+        "object": "list",
+        "data": [{"id": "agentic-rag", "object": "model", "created": 0, "owned_by": "local"}]
+    }
+
+@app.post("/v1/chat/completions")
+async def chat(req: ChatReq):
+    user = ""
+    for m in req.messages[::-1]:
+        if m.role == "user":
+            user = m.content
+            break
+    answer = await agent.answer(user)
+    return {
+        "id": f"agentic_{int(time.time())}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": req.model or "agentic-rag",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": answer},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    }

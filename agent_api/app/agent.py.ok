@@ -1,0 +1,44 @@
+import os
+import httpx
+from .tools import Tools
+
+SYSTEM_PROMPT = """You are an agentic RAG assistant.
+Tools available:
+- search_chunks(query): retrieve chunks (id, text, metadata)
+- python_exec(code): execute python for analysis
+Always cite sources by [n] and include original_path from metadata when available.
+"""
+
+class Agent:
+    def __init__(self):
+        self.ollama_base = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+        self.llm_model = os.getenv("LLM_MODEL", "qwen2.5:14b")
+        self.max_steps = int(os.getenv("MAX_STEPS", "6"))
+        self.tools = Tools()
+
+    async def llm(self, messages, temperature=0.2):
+        async with httpx.AsyncClient(timeout=180) as client:
+            r = await client.post(f"{self.ollama_base}/api/chat", json={
+                "model": self.llm_model,
+                "messages": messages,
+                "options": {"temperature": temperature},
+                "stream": False
+            })
+            r.raise_for_status()
+            data = r.json()
+            return data["message"]["content"]
+
+    async def answer(self, user_text: str) -> str:
+        hits = self.tools.search_chunks(user_text, top_k=10)
+        context_lines = []
+        for i, h in enumerate(hits, 1):
+            md = h.get("metadata") or {}
+            path = md.get("original_path") or md.get("file_path") or "unknown"
+            snippet = (h.get("text") or "")[:800]
+            context_lines.append(f"[{i}] path={path}\n{snippet}")
+        context = "\n\n".join(context_lines) if context_lines else "(no matches)"
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Question: {user_text}\n\nContext:\n{context}\n\nWrite an answer. Use citations like [1], [2]."}
+        ]
+        return await self.llm(messages)

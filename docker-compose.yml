@@ -1,0 +1,108 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: agentic-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./volumes/ollama:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  agent_api:
+    build:
+      context: ./agent_api
+      dockerfile: Dockerfile
+    container_name: agentic-api
+    ports:
+      - "11436:11436"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - LLM_MODEL=llama4:latest
+      - EMBED_MODEL=all-MiniLM-L6-v2
+      - CHROMA_PATH=/chroma
+      - COLLECTION=documents
+      - PYRUNNER_URL=http://runner:9000/run
+      - TOP_K=10
+      - MAX_STEPS=6
+      - LOG_PATH=/logs/agent_api.log
+      - CONTEXT_MAX_TOKENS=12000
+      - CONTEXT_SUMMARY_TOKENS=1200
+      - CONTEXT_RECENT_TOKENS=7000
+      - NOTES_MAX_TOKENS=600
+      - SUMMARY_UPDATE_TRIGGER_TOKENS=9000
+      - STATE_PATH=/state
+    volumes:
+      - ./volumes/chroma:/chroma
+      - ./volumes/logs:/logs
+      - ./volumes/state:/state
+    depends_on:
+      - ollama
+      - runner
+    restart: unless-stopped
+
+  indexer:
+    build:
+      context: ./indexer
+      dockerfile: Dockerfile
+    container_name: agentic-indexer
+    environment:
+      - ROOT_DIR=/data
+      - CHROMA_PATH=/chroma
+      - COLLECTION=documents
+      - COLLECTION_DOCX=documents_docx
+      - EMBED_MODEL=all-MiniLM-L6-v2
+      - CHUNK_SIZE=1200
+      - CHUNK_OVERLAP=180
+      - MANIFEST_PATH=/manifest/manifest.sqlite3
+      - LOG_PATH=/logs/indexer.log
+      - MIN_TEXT_CHARS=200
+      - WORKERS=6
+      - BATCH_UPSERT=256
+      - ZIP_MAX_DEPTH=2
+    volumes:
+      - /media/felix/RAG/1:/data:ro
+      - ./volumes/chroma:/chroma
+      - ./volumes/manifest:/manifest
+      - ./volumes/logs:/logs
+    depends_on:
+      - ollama
+    restart: "no"
+
+  runner:
+    build:
+      context: ./runner
+      dockerfile: Dockerfile
+    container_name: agentic-runner
+    ports:
+      - "9000:9000"
+    environment:
+      - NO_INTERNET=1
+      - TIMEOUT_SECONDS=25
+      - LOG_PATH=/logs/runner.log
+    volumes:
+      - ./volumes/logs:/logs
+    restart: unless-stopped
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: agentic-openwebui
+    ports:
+      - "8086:8086"
+    environment:
+      - OPENAI_API_BASE_URL=http://agent_api:11436/v1
+      - OPENAI_API_KEY=sk-empty-key
+      - WEBUI_SECRET_KEY=your-secret-key-here
+      - DEFAULT_MODELS=agentic-rag
+      - PORT=8086
+    depends_on:
+      - agent_api
+    restart: unless-stopped
