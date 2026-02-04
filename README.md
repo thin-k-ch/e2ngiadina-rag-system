@@ -1,4 +1,4 @@
-# WINDSURF RAG System
+# E2NGIADINA RAG System
 
 Ein vollständiges RAG (Retrieval-Augmented Generation) System mit GPU-Unterstützung und erweiterter Datei-Indexierung.
 

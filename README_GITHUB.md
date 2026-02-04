@@ -1,4 +1,4 @@
-# 🚀 WINDSURF RAG System
+# 🚀 E2NGIADINA RAG System
 
 **Production-Ready RAG System with Memory, Multi-Format Indexing, and GPU Acceleration**
 

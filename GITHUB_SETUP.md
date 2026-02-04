@@ -12,6 +12,11 @@
 
 ## 🌐 GitHub Repository erstellen
 
+### Repository Informationen
+- **Name:** `e2ngiadina-rag-system`
+- **Beschreibung:** `Production-Ready RAG System with Memory, Multi-Format Indexing, and GPU Acceleration`
+- **Tags:** `rag`, `llm`, `docker`, `gpu`, `memory`, `chromadb`, `ollama`, `fastapi`
+
 ### Option 1: GitHub CLI (empfohlen)
 ```bash
 # GitHub CLI installieren (falls nicht vorhanden)
@@ -24,13 +29,13 @@ brew install gh
 gh auth login
 
 # Repository erstellen und pushen
-gh repo create windsurf-rag-system --public --source=. --remote=origin --push
+gh repo create e2ngiadina-rag-system --public --source=. --remote=origin --push
 ```
 
 ### Option 2: Manuelles Setup
 1. **GitHub Repository erstellen:**
    - Gehe zu https://github.com/new
-   - Repository Name: `windsurf-rag-system`
+   - Repository Name: `e2ngiadina-rag-system`
    - Description: `Production-Ready RAG System with Memory, Multi-Format Indexing, and GPU Acceleration`
    - Public/Private wählen
    - **NICHT** README, .gitignore oder License hinzufügen (bereits vorhanden)
@@ -38,7 +43,7 @@ gh repo create windsurf-rag-system --public --source=. --remote=origin --push
 2. **Remote hinzufügen und pushen:**
 ```bash
 # Remote URL ersetzen mit Ihrer GitHub URL
-git remote add origin https://github.com/IHR_USERNAME/windsurf-rag-system.git
+git remote add origin https://github.com/IHR_USERNAME/e2ngiadina-rag-system.git
 
 # Branch umbenennen zu main (falls nicht schon geschehen)
 git branch -M main
@@ -46,15 +51,6 @@ git branch -M main
 # Pushen
 git push -u origin main
 ```
-
----
-
-## 📝 Repository Details
-
-### Repository Informationen
-- **Name:** `windsurf-rag-system`
-- **Beschreibung:** `Production-Ready RAG System with Memory, Multi-Format Indexing, and GPU Acceleration`
-- **Tags:** `rag`, `llm`, `docker`, `gpu`, `memory`, `chromadb`, `ollama`, `fastapi`
 
 ### GitHub Features aktivieren
 1. **Issues:** Für Bug Reports und Feature Requests
@@ -159,7 +155,7 @@ git push origin v1.0
 
 ### Post Template
 ```
-🚀 Just released WINDSURF RAG System v1.0!
+🚀 Just released E2NGIADINA RAG System v1.0!
 
 A production-ready RAG system with:
 🧠 Persistent Memory System
@@ -168,7 +164,7 @@ A production-ready RAG system with:
 🌐 Web Interface
 📊 37,624 searchable chunks
 
-GitHub: https://github.com/IHR_USERNAME/windsurf-rag-system
+GitHub: https://github.com/IHR_USERNAME/e2ngiadina-rag-system
 
 #RAG #LLM #Docker #GPU #MachineLearning
 ```
@@ -180,8 +176,8 @@ GitHub: https://github.com/IHR_USERNAME/windsurf-rag-system
 ### Quick Test für neue Nutzer
 ```bash
 # Klonen
-git clone https://github.com/IHR_USERNAME/windsurf-rag-system.git
-cd windsurf-rag-system
+git clone https://github.com/IHR_USERNAME/e2ngiadina-rag-system.git
+cd e2ngiadina-rag-system
 
 # Starten
 ./START.sh
@@ -222,9 +218,9 @@ curl http://localhost:11436/health
 
 ## 🎉 Erfolg!
 
-Das WINDSURF RAG System ist jetzt bereit für die Open-Source Community!
+Das E2NGIADINA RAG System ist jetzt bereit für die Open-Source Community!
 
-**GitHub Repository:** https://github.com/IHR_USERNAME/windsurf-rag-system
+**GitHub Repository:** https://github.com/IHR_USERNAME/e2ngiadina-rag-system
 
 **🚀 Production-Ready RAG mit Memory - Jetzt für jeden verfügbar!**
 

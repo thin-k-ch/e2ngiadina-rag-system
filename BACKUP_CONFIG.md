@@ -1,4 +1,4 @@
-# WINDSURF RAG System - Configuration Backup
+# E2NGIADINA RAG System - Configuration Backup
 
 ## 📋 Critical Configuration Files
 

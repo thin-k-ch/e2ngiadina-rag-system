@@ -1,4 +1,4 @@
-# WINDSURF RAG System - Status & Configuration
+# E2NGIADINA RAG System - Status & Configuration
 
 ## 🎯 System Status: **FULLY OPERATIONAL**
 

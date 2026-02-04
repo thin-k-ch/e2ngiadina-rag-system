@@ -1,4 +1,4 @@
-# WINDSURF RAG System - Complete Setup Guide
+# E2NGIADINA RAG System - Complete Setup Guide
 
 ## System Overview
 - **Purpose**: RAG (Retrieval-Augmented Generation) System mit GPU-Unterstützung

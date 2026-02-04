@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-# WINDSURF RAG System - One-Click Startup
-echo "🚀 Starting WINDSURF RAG System..."
+# E2NGIADINA RAG System - One-Click Startup
+echo "🚀 Starting E2NGIADINA RAG System..."
 
 # Check if we're in the right directory
 if [ ! -f "docker-compose.yml" ]; then

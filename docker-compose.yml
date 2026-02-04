@@ -1,7 +1,7 @@
 services:
   ollama:
     image: ollama/ollama:latest
-    container_name: agentic-ollama
+    container_name: e2ngiadina-ollama
     ports:
       - "11434:11434"
     volumes:
@@ -21,7 +21,7 @@ services:
     build:
       context: ./agent_api
       dockerfile: Dockerfile
-    container_name: agentic-api
+    container_name: e2ngiadina-api
     ports:
       - "11436:11436"
     environment:
@@ -53,7 +53,7 @@ services:
     build:
       context: ./indexer
       dockerfile: Dockerfile
-    container_name: agentic-indexer
+    container_name: e2ngiadina-indexer
     environment:
       - ROOT_DIR=/data
       - CHROMA_PATH=/chroma
@@ -81,7 +81,7 @@ services:
     build:
       context: ./runner
       dockerfile: Dockerfile
-    container_name: agentic-runner
+    container_name: e2ngiadina-runner
     ports:
       - "9000:9000"
     environment:
@@ -94,7 +94,7 @@ services:
 
   openwebui:
     image: ghcr.io/open-webui/open-webui:main
-    container_name: agentic-openwebui
+    container_name: e2ngiadina-openwebui
     ports:
       - "8086:8086"
     environment:
