@@ -59,6 +59,10 @@ services:
       - CHROMA_PATH=/chroma
       - COLLECTION=documents
       - COLLECTION_DOCX=documents_docx
+      - COLLECTION_TXT=documents_txt
+      - COLLECTION_MSG=documents_msg
+      - COLLECTION_MAIL=documents_mail
+      - COLLECTION_MAIL_EWS=documents_mail_ews
       - EMBED_MODEL=all-MiniLM-L6-v2
       - CHUNK_SIZE=1200
       - CHUNK_OVERLAP=180
@@ -68,11 +72,15 @@ services:
       - WORKERS=6
       - BATCH_UPSERT=256
       - ZIP_MAX_DEPTH=2
+      - MAIL_ROOT=/mail
+      - EWS_BODIES_DB=/mail/ews-bodies.sqlite
+      - EWS_META_DB=/mail/ews-db.sqlite
     volumes:
       - /media/felix/RAG/1:/data:ro
       - ./volumes/chroma:/chroma
       - ./volumes/manifest:/manifest
       - ./volumes/logs:/logs
+      - /home/felix/snap/thunderbird/common/.thunderbird/60gutlhs.default/ExQuilla/outlook.office365.com:/mail:ro
     depends_on:
       - ollama
     restart: "no"
