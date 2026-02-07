@@ -2,41 +2,29 @@
 
 ## 🚀 STARTREIHENFOLGE
 
-### 1. Elasticsearch (Port 9200)
+### Automatischer Start (Systemd)
 ```bash
-# Health Check
-curl -s http://localhost:9200/_cluster/health | jq '.status'
-# Expected: "green" or "yellow"
+# Beim System-Boot automatisch
+sudo systemctl enable windsurf-rag.service
+# Startet das gesamte System mit GPU Support
 ```
 
-### 2. Ollama (Port 11434)
+### Manueller Start (GPU Optimiert)
 ```bash
-# Health Check
-curl -s http://localhost:11434/api/tags | jq -r '.models[0].name'
-# Expected: Model name (e.g., "llama4:latest")
+# GPU-optimierter Start
+./scripts/start_system.sh
+
+# Oder klassisch
+docker compose up -d
 ```
 
-### 3. Agent (Port 11436)
-```bash
-# Health Check
-curl -s http://localhost:11436/health
-# Expected: HTTP 200
-```
-
-### 4. OpenWebUI (Port 8086)
-```bash
-# Health Check
-curl -s -o /dev/null -w "%{http_code}" http://localhost:8086/
-# Expected: 200
-```
-
-### 5. FSCrawler (Optional - für neue Indexierung)
-```bash
-# Goldenes Startkommando
-cd /media/felix/RAG/AGENTIC/tools/fscrawler
-FSCRAWLER_HOME="/media/felix/RAG/AGENTIC/volumes/fscrawler" \
-./bin/fscrawler rag1 --loop 1
-```
+### Service-Reihenfolge
+1. **Docker** (mit GPU Runtime)
+2. **Snap Ollama** wird deaktiviert
+3. **Elasticsearch** (Port 9200)
+4. **Ollama** (Port 11434) mit GPU
+5. **Agent API** (Port 11436)
+6. **OpenWebUI** (Port 8086)
 
 ## 📡 PORTS + ERWARTETE HTTP CODES
 
