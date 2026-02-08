@@ -75,6 +75,17 @@ Thumbs.db
 *.bak
 *.backup
 
+# Additional temporary files
+volumes*/
+volumes__*/
+volumeskeep*/
+cookies.txt
+package*.json
+package-lock.json
+*.html
+*.js
+*.swp
+
 # Node modules (if any)
 node_modules/
 
