@@ -12,3 +12,4 @@ beautifulsoup4==4.12.3
 lxml==5.2.2
 olefile==0.47
 mailbox==0.4
+elasticsearch==8.12.1

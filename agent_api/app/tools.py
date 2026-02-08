@@ -2,6 +2,7 @@ import os
 import httpx
 from sentence_transformers import SentenceTransformer
 from .chroma_client import ChromaClient
+from .tools_es import ESTools
 
 class Tools:
     def __init__(self):
@@ -20,6 +21,7 @@ class Tools:
         self.chroma_txt = ChromaClient(self.chroma_path, self.collection_txt)
         self.chroma_msg = ChromaClient(self.chroma_path, self.collection_msg)
         self.chroma_mail = ChromaClient(self.chroma_path, self.collection_mail)
+        self.es = ESTools()
 
     def search_chunks(self, query: str, top_k: int | None = None):
         k = top_k or self.top_k
@@ -140,6 +142,60 @@ class Tools:
             if ok:
                 out.append(h)
         return out
+
+    def search_exact_phrase(self, phrase: str, size: int = 5):
+        """Exact phrase search using ES only"""
+        print(f"🔍 EXACT PHRASE SEARCH: '{phrase}'")
+        
+        # ES exact phrase search only
+        es_hits = self.es.es_exact_phrase_content(phrase, size)
+        print(f"📊 ES EXACT PHRASE: {len(es_hits)} hits")
+        
+        # Convert to standard format
+        hits = []
+        for hit in es_hits:
+            hits.append({
+                "id": hit["id"],
+                "distance": None,  # No distance for ES
+                "text": hit["content"],
+                "metadata": {
+                    "filename": hit["filename"],
+                    "path_real": hit["path_real"],
+                    "file_url": hit["file_url"]
+                }
+            })
+        
+        return hits
+
+    def search_hybrid(self, queries: list[str], top_k_each: int = 8, max_total: int = 36):
+        print(f"🔍 HYBRID SEARCH: {len(queries)} queries")
+        
+        # Chroma multi
+        chroma_hits = self.search_multi(queries, top_k_each=top_k_each, max_total=max_total)
+        print(f"📊 CHROMA: {len(chroma_hits)} hits")
+        
+        # ES multi (use first 6 queries) - with fallback
+        es_hits=[]
+        try:
+            for q in queries[:6]:
+                es_hits.extend(self.es.search_es(q, k=top_k_each))
+            print(f"🔍 ELASTICSEARCH: {len(es_hits)} hits")
+        except Exception as e:
+            print(f"❌ ES search failed, using Chroma only: {e}")
+            return chroma_hits[:max_total]
+        
+        # merge by id
+        seen=set()
+        merged=[]
+        for h in chroma_hits + es_hits:
+            hid=h.get("id")
+            if not hid or hid in seen:
+                continue
+            seen.add(hid)
+            merged.append(h)
+        
+        print(f"🎯 HYBRID RESULT: {len(merged)} unique hits")
+        return merged[:max_total]
 
     async def python_exec(self, code: str, locals: dict | None = None):
         async with httpx.AsyncClient(timeout=30) as client:

@@ -53,6 +53,8 @@ services:
       - runner
       - elasticsearch
     restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 60s
 
   indexer:
     build:
@@ -126,6 +128,9 @@ services:
       - /media/felix/RAG/1/volumes/esdata:/usr/share/elasticsearch/data
     ports:
       - "9200:9200"
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 120s
 
   kibana:
     image: docker.elastic.co/kibana/kibana:8.12.2
