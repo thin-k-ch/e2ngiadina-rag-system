@@ -5,7 +5,7 @@ import hashlib
 from typing import List, Dict, Tuple
 
 from .tools import Tools
-from .query_planner import plan_queries, refine_queries
+from .query_planner import plan_queries, detect_retrieval_mode, refine_queries
 from .rerank import rerank
 from .evidence import build_evidence_pack
 
@@ -182,10 +182,43 @@ class Agent:
         raw_messages: List[Dict],
         summary: str,
         notes: str,
-    ) -> Tuple[str, str, str]:
+    ) -> Tuple[str, str, str, List[Dict]]:
         """
         Returns (answer, new_summary, new_notes)
         """
+        # DETECT RETRIEVAL MODE FIRST
+        mode_detection = detect_retrieval_mode(user_text)
+        mode = mode_detection.get("mode", "rag")
+        
+        # EXACT PHRASE MODE - ES ONLY, NO LLM
+        if mode == "exact_phrase":
+            phrase = mode_detection["phrase"]
+            hits = self.tools.search_exact_phrase(phrase, size=10)
+            
+            if not hits:
+                answer = "0 exakte Treffer"
+                sources = []
+            else:
+                # Build bullet list of filenames
+                filenames = []
+                sources = []
+                for hit in hits:
+                    filename = hit["metadata"].get("filename", "")
+                    path_real = hit["metadata"].get("path_real", "")
+                    
+                    if filename:
+                        filenames.append(f"• {filename}")
+                        
+                        # Generate /open URL
+                        if path_real:
+                            import urllib.parse
+                            encoded_path = urllib.parse.quote(path_real)
+                            sources.append(f"http://localhost:11436/open?path={encoded_path}")
+                
+                answer = "\n".join(filenames)
+            
+            return answer, summary, notes, sources
+        
         # AGENTIC LOOP: PLAN → RETRIEVE → RERANK → EVIDENCE → ANSWER/EXTRACT
         plan = await plan_queries(self.llm, user_text)
         mode = plan.get("mode","rag")
@@ -197,7 +230,7 @@ class Agent:
         final_sources = []
 
         for attempt in range(2):  # max 2 iterations
-            hits = self.tools.search_multi(queries, top_k_each=8, max_total=30)
+            hits = self.tools.search_hybrid(queries, top_k_each=8, max_total=36)
             hits = self.tools.filter_must_include(hits, must_include)
             if hits:
                 hits = rerank(queries[0], hits, top_n=12)
@@ -228,11 +261,11 @@ class Agent:
 
         # if still nothing:
         if not final_hits:
-            return ("Nicht in den Dokumenten gefunden.", summary, notes)
+            return ("Nicht in den Dokumenten gefunden.", summary, notes, [])
 
         # OPTIONAL: Wenn attempt 2 immer noch weak evidence, dann lieber "nicht gefunden"
         if _weak_evidence(final_hits):
-            return ("Nicht in den Dokumenten gefunden.", summary, notes)
+            return ("Nicht in den Dokumenten gefunden.", summary, notes, [])
 
         # now answer using final_context
         context = final_context
@@ -287,4 +320,4 @@ class Agent:
                     src_lines.append(f"[{n}] {display_path}")
             answer = answer.rstrip() + "\n\nQuellen (lokal):\n" + "\n\n".join(src_lines)
 
-        return (answer, summary, notes)
+        return (answer, summary, notes, sources)

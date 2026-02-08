@@ -8,6 +8,7 @@
 # Docker Volumes (persistent data)
 volumes/
 !/volumes/.gitkeep
+!/volumes/fscrawler/rag1/_settings.yaml
 
 # Logs
 *.log
@@ -87,4 +88,21 @@ node_modules/
 # mypy
 .mypy_cache/
 .dmypy.json
-dmypy.json
+
+# --- allow test scripts to be committed ---
+!tests/
+!tests/**/
+!tests/**/*.sh
+!tests/**/*.bash
+!tests/**/*.py
+!tests/**/*.md
+!tests/**/*.txt
+!tests/**/.gitkeep
+
+# --- keep ignoring test artifacts ---
+tests/**/out/
+tests/**/tmp/
+tests/**/*.log
+tests/**/*.json
+tests/**/*.ndjson
+tests/**/*.csv

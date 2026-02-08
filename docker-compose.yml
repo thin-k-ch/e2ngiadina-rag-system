@@ -5,7 +5,7 @@ services:
     ports:
       - "11434:11434"
     volumes:
-      - ./volumes/ollama:/root/.ollama
+      - /media/felix/RAG/ollama:/root/.ollama
     environment:
       - OLLAMA_KEEP_ALIVE=24h
     deploy:
@@ -41,14 +41,17 @@ services:
       - SUMMARY_UPDATE_TRIGGER_TOKENS=9000
       - STATE_PATH=/state
       - FILE_BASE=/media/felix/RAG/1
+      - ES_URL=http://elasticsearch:9200
+      - ES_INDEX=rag_files_v1
     volumes:
-      - ./volumes/chroma:/chroma
-      - ./volumes/logs:/logs
-      - ./volumes/state:/state
+      - /media/felix/RAG/1/volumes/chroma:/chroma
+      - /media/felix/RAG/1/volumes/logs:/logs
+      - /media/felix/RAG/1/volumes/state:/state
       - /media/felix/RAG/1:/media/felix/RAG/1
     depends_on:
       - ollama
       - runner
+      - elasticsearch
     restart: unless-stopped
 
   indexer:
@@ -77,11 +80,15 @@ services:
       - MAIL_ROOT=/mail
       - EWS_BODIES_DB=/mail/ews-bodies.sqlite
       - EWS_META_DB=/mail/ews-db.sqlite
+      - ES_URL=http://elasticsearch:9200
+      - ES_INDEX=rag_files_v1
+      - CHROMA_COLLECTION=documents
+      - ES_BATCH=1000
     volumes:
       - /media/felix/RAG/1:/data:ro
-      - ./volumes/chroma:/chroma
-      - ./volumes/manifest:/manifest
-      - ./volumes/logs:/logs
+      - /media/felix/RAG/1/volumes/chroma:/chroma
+      - /media/felix/RAG/1/volumes/manifest:/manifest
+      - /media/felix/RAG/1/volumes/logs:/logs
       - /home/felix/snap/thunderbird/common/.thunderbird/60gutlhs.default/ExQuilla/outlook.office365.com:/mail:ro
     depends_on:
       - ollama
@@ -99,8 +106,36 @@ services:
       - TIMEOUT_SECONDS=25
       - LOG_PATH=/logs/runner.log
     volumes:
-      - ./volumes/logs:/logs
+      - /media/felix/RAG/1/volumes/logs:/logs
     restart: unless-stopped
+
+  elasticsearch:
+    user: "1000:1000"
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.2
+    container_name: agentic-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - /media/felix/RAG/1/volumes/esdata:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.2
+    container_name: agentic-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
 
   openwebui:
     image: ghcr.io/open-webui/open-webui:main
@@ -123,3 +158,7 @@ services:
       - agent_api
       - ollama
     restart: unless-stopped
+
+networks:
+  default:
+    name: agentic_default

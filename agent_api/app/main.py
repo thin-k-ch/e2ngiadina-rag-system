@@ -1,17 +1,45 @@
 import os
 import time
 import hashlib
+import json
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .agent import Agent
 from .state import StateStore
+from .es_proxy import router as es_router
 
 app = FastAPI(title="AGENTIC RAG API (OpenAI-compatible subset)")
 agent = Agent()
 
 STATE_PATH = os.getenv("STATE_PATH", "/state")
+
+def _sse_chat_completion(full_response: dict):
+    """OpenAI SSE format: data: {...} and data: [DONE]"""
+    rid = full_response.get("id", "agentic_stream")
+    created = full_response.get("created", int(time.time()))
+    model = full_response.get("model")
+    
+    content = ""
+    try:
+        content = full_response["choices"][0]["message"]["content"]
+    except Exception:
+        content = ""
+
+    chunk = {
+        "id": rid,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {"role": "assistant", "content": content},
+            "finish_reason": "stop"
+        }]
+    }
+    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+    yield "data: [DONE]\n\n"
 store = StateStore(STATE_PATH)
 
 class Message(BaseModel):
@@ -85,7 +113,7 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
             user_text = m.content
             break
 
-    answer, new_summary, new_notes = await agent.answer(
+    answer, new_summary, new_notes, sources = await agent.answer(
         user_text=user_text,
         raw_messages=[m.model_dump() for m in req.messages],
         summary=summary,
@@ -94,17 +122,31 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
 
     store.save(conv_id, new_summary, new_notes)
 
-    return {
+    response = {
         "id": f"agentic_{int(time.time())}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": req.model or "agentic-rag",
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": answer},
+            "message": {
+                "role": "assistant",
+                "content": answer
+            },
             "finish_reason": "stop"
-        }],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        # debugging / optional visibility:
-        "conversation_id": conv_id,
+        }]
     }
+    
+    # Add sources if available
+    if sources:
+        response["sources"] = sources
+    
+    # --- OpenAI SSE streaming support ---
+    if getattr(req, "stream", False):
+        return StreamingResponse(_sse_chat_completion(response), media_type="text/event-stream")
+    # --- end streaming support ---
+    
+    return response
+
+# Include ES Proxy Router
+app.include_router(es_router, prefix="/proxy", tags=["es-proxy"])
