@@ -2,6 +2,7 @@ import os
 import time
 import hashlib
 import json
+import asyncio
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -14,6 +15,20 @@ app = FastAPI(title="AGENTIC RAG API (OpenAI-compatible subset)")
 agent = Agent()
 
 STATE_PATH = os.getenv("STATE_PATH", "/state")
+
+def _sse_chunk(rid, created, model, delta, finish_reason=None):
+    chunk = {
+        "id": rid,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason
+        }]
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
 def _sse_chat_completion(full_response: dict):
     """OpenAI SSE format: data: {...} and data: [DONE]"""
@@ -96,8 +111,8 @@ async def open_file(path: str):
     
     return FileResponse(normalized_path)
 
-@app.post("/v1/chat/completions")
-async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = Header(default=None)):
+async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = None):
+    """Non-streaming chat implementation - reused by streaming and non-streaming paths"""
     if not req.messages:
         return {"error": "No messages provided"}
 
@@ -141,12 +156,43 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
     if sources:
         response["sources"] = sources
     
-    # --- OpenAI SSE streaming support ---
-    if getattr(req, "stream", False):
-        return StreamingResponse(_sse_chat_completion(response), media_type="text/event-stream")
-    # --- end streaming support ---
-    
     return response
+
+@app.post("/v1/chat/completions")
+async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = Header(default=None)):
+    if getattr(req, "stream", False):
+        async def gen():
+            rid = f"agentic_{int(time.time())}"
+            created = int(time.time())
+            model = req.model or "agentic-rag"
+
+            # 1) send immediately (prevents OpenWebUI hanging)
+            yield _sse_chunk(rid, created, model, {"role": "assistant"})
+            await asyncio.sleep(0)
+
+            # 2) compute FULL response using existing non-stream logic
+            full = await chat_non_stream_impl(req, x_conversation_id)
+            
+            # Handle error case
+            if "error" in full:
+                yield _sse_chunk(rid, created, model, {"content": f"Error: {full['error']}"}, finish_reason="stop")
+                yield "data: [DONE]\n\n"
+                return
+
+            content = ""
+            try:
+                content = full["choices"][0]["message"]["content"]
+            except Exception:
+                content = ""
+
+            # 3) send content and done
+            yield _sse_chunk(rid, created, model, {"content": content}, finish_reason="stop")
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+    
+    # else: existing non-stream return
+    return await chat_non_stream_impl(req, x_conversation_id)
 
 # Include ES Proxy Router
 app.include_router(es_router, prefix="/proxy", tags=["es-proxy"])

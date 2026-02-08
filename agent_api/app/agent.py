@@ -90,6 +90,15 @@ def _hits_preview(hits, n=5):
         lines.append(f"{i}. {p} — {sn} …")
     return "\n".join(lines)
 
+def _has_search_intent(user_text: str) -> bool:
+    """Check if user is explicitly asking for document search"""
+    search_keywords = [
+        "suche", "finde", "in den dokumenten", "datei", 
+        "dokument", "quelle", "pdf", "xlsx", "docx", "pfad"
+    ]
+    user_lower = user_text.lower()
+    return any(keyword in user_lower for keyword in search_keywords)
+
 def _weak_evidence(hits):
     # simple gate: too few hits or all distances bad (if present)
     if not hits or len(hits) < 3:
@@ -261,11 +270,31 @@ class Agent:
 
         # if still nothing:
         if not final_hits:
-            return ("Nicht in den Dokumenten gefunden.", summary, notes, [])
+            # Check if user has explicit search intent
+            if _has_search_intent(user_text):
+                return ("Nicht in den Dokumenten gefunden.", summary, notes, [])
+            else:
+                # Fallback to LLM for non-search queries
+                fallback_messages = [
+                    {"role": "system", "content": "You are a helpful assistant. Answer the user's question directly and concisely."},
+                    {"role": "user", "content": user_text}
+                ]
+                fallback_answer = await self.llm(fallback_messages, temperature=0.2)
+                return (fallback_answer.strip(), summary, notes, [])
 
         # OPTIONAL: Wenn attempt 2 immer noch weak evidence, dann lieber "nicht gefunden"
         if _weak_evidence(final_hits):
-            return ("Nicht in den Dokumenten gefunden.", summary, notes, [])
+            # Check if user has explicit search intent
+            if _has_search_intent(user_text):
+                return ("Nicht in den Dokumenten gefunden.", summary, notes, [])
+            else:
+                # Fallback to LLM for non-search queries
+                fallback_messages = [
+                    {"role": "system", "content": "You are a helpful assistant. Answer the user's question directly and concisely."},
+                    {"role": "user", "content": user_text}
+                ]
+                fallback_answer = await self.llm(fallback_messages, temperature=0.2)
+                return (fallback_answer.strip(), summary, notes, [])
 
         # now answer using final_context
         context = final_context
