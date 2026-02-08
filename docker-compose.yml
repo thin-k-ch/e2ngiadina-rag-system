@@ -28,6 +28,7 @@ services:
       - OLLAMA_BASE_URL=http://ollama:11434
       - LLM_MODEL=llama4:latest
       - EMBED_MODEL=all-MiniLM-L6-v2
+      - ENABLE_DEBUG_ENDPOINTS=0
       - CHROMA_PATH=/chroma
       - COLLECTION=documents
       - PYRUNNER_URL=http://runner:9000/run
@@ -143,7 +144,7 @@ services:
       - elasticsearch
 
   openwebui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:v0.3.18
     container_name: e2ngiadina-openwebui
     ports:
       - "8086:8086"
@@ -155,10 +156,20 @@ services:
       # OpenAI-compatible zusätzliche API(s) - unser agentic-rag
       - OPENAI_API_BASE_URLS=http://agent_api:11436/v1
       - OPENAI_API_KEYS=local
+      - OPENAI_API_KEY=local
       # Allgemeine Settings
       - WEBUI_SECRET_KEY=your-secret-key-here
       - DEFAULT_MODELS=agentic-rag,llama4:latest
       - PORT=8086
+      # User Management
+      - DEFAULT_USER_ROLE=admin
+      - ENABLE_SIGNUP=true
+      - ENABLE_LOGIN=true
+      - WEBUI_AUTH=False
+      # Streaming & Timeout Optimierungen
+      - AIOHTTP_CLIENT_TIMEOUT=300
+      - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=7
+      - THREAD_POOL_SIZE=20
     depends_on:
       - agent_api
       - ollama

@@ -3,8 +3,9 @@ import time
 import hashlib
 import json
 import asyncio
-from fastapi import FastAPI, Header, Request
-from fastapi.responses import FileResponse, StreamingResponse
+import traceback
+from fastapi import FastAPI, Header, Request, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 from .agent import Agent
@@ -14,9 +15,50 @@ from .es_proxy import router as es_router
 app = FastAPI(title="AGENTIC RAG API (OpenAI-compatible subset)")
 agent = Agent()
 
-STATE_PATH = os.getenv("STATE_PATH", "/state")
+ENABLE_DEBUG_ENDPOINTS = os.getenv("ENABLE_DEBUG_ENDPOINTS", "0") == "1"
 
-def _sse_chunk(rid, created, model, delta, finish_reason=None):
+STATE_PATH = os.getenv("STATE_PATH", "/state")
+store = StateStore(STATE_PATH)
+
+# ----------------------------
+# OpenAI-compatible SSE helpers
+# ----------------------------
+
+def _normalize_delta_content(v) -> str:
+    """
+    OpenAI streaming requires: choices[0].delta.content is a STRING (or absent).
+    Some internal code may emit dicts like {"type":"token","content":"..."}.
+    We convert those to strings so OpenWebUI can render streaming properly.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, bytes):
+        try:
+            return v.decode("utf-8", errors="ignore")
+        except Exception:
+            return str(v)
+    if isinstance(v, dict):
+        # common internal shape: {"type": "...", "content": "..."}
+        inner = v.get("content")
+        if isinstance(inner, str):
+            return inner
+        if inner is None:
+            # fallback: stringify dict (last resort)
+            return json.dumps(v, ensure_ascii=False)
+        return str(inner)
+    # fallback: stringify any other type
+    return str(v)
+
+def _sse_chunk(rid: str, created: int, model: str, delta: dict, finish_reason=None) -> str:
+    # Ensure OpenAI-compatible delta fields
+    safe_delta = {}
+    if "role" in delta and isinstance(delta["role"], str):
+        safe_delta["role"] = delta["role"]
+    if "content" in delta:
+        safe_delta["content"] = _normalize_delta_content(delta["content"])
+
     chunk = {
         "id": rid,
         "object": "chat.completion.chunk",
@@ -24,38 +66,22 @@ def _sse_chunk(rid, created, model, delta, finish_reason=None):
         "model": model,
         "choices": [{
             "index": 0,
-            "delta": delta,
+            "delta": safe_delta,
             "finish_reason": finish_reason
         }]
     }
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
-def _sse_chat_completion(full_response: dict):
-    """OpenAI SSE format: data: {...} and data: [DONE]"""
-    rid = full_response.get("id", "agentic_stream")
-    created = full_response.get("created", int(time.time()))
-    model = full_response.get("model")
-    
-    content = ""
-    try:
-        content = full_response["choices"][0]["message"]["content"]
-    except Exception:
-        content = ""
+def derive_conv_id(messages, x_conversation_id: str | None) -> str:
+    if x_conversation_id and x_conversation_id.strip():
+        return x_conversation_id.strip()
+    joined = "\n".join([f"{m.role}:{m.content}" for m in messages])[:2000]
+    h = hashlib.sha1(joined.encode("utf-8", errors="ignore")).hexdigest()
+    return f"conv_{h[:16]}"
 
-    chunk = {
-        "id": rid,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {"role": "assistant", "content": content},
-            "finish_reason": "stop"
-        }]
-    }
-    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-    yield "data: [DONE]\n\n"
-store = StateStore(STATE_PATH)
+# ----------------------------
+# OpenAI request models
+# ----------------------------
 
 class Message(BaseModel):
     role: str
@@ -66,14 +92,9 @@ class ChatReq(BaseModel):
     messages: list[Message]
     stream: bool | None = False
 
-def derive_conv_id(messages: list[Message], x_conversation_id: str | None) -> str:
-    if x_conversation_id and x_conversation_id.strip():
-        return x_conversation_id.strip()
-
-    # stable-ish hash from the first ~2000 chars of conversation
-    joined = "\n".join([f"{m.role}:{m.content}" for m in messages])[:2000]
-    h = hashlib.sha1(joined.encode("utf-8", errors="ignore")).hexdigest()
-    return f"conv_{h[:16]}"
+# ----------------------------
+# Endpoints
+# ----------------------------
 
 @app.get("/health")
 def health():
@@ -88,31 +109,19 @@ def models():
 
 @app.get("/open")
 async def open_file(path: str):
-    """
-    File proxy endpoint to serve local files via HTTP
-    Security: Only serves files under FILE_BASE if set
-    """
     file_base = os.getenv("FILE_BASE", "")
-    
-    # Security check: only allow files under base directory
     if file_base and not path.startswith(file_base):
         return {"error": "Access denied - path outside base directory"}
-    
-    # Normalize path
+
     normalized_path = os.path.normpath(path)
-    
-    # Check if file exists
     if not os.path.exists(normalized_path):
         return {"error": "File not found"}
-    
-    # Check if it's a file (not directory)
     if not os.path.isfile(normalized_path):
         return {"error": "Path is not a file"}
-    
+
     return FileResponse(normalized_path)
 
 async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = None):
-    """Non-streaming chat implementation - reused by streaming and non-streaming paths"""
     if not req.messages:
         return {"error": "No messages provided"}
 
@@ -121,7 +130,6 @@ async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = Non
     summary = state.get("summary", "") or ""
     notes = state.get("notes", "") or ""
 
-    # take last user message (but keep full raw history for continuity)
     user_text = ""
     for m in req.messages[::-1]:
         if m.role == "user":
@@ -144,18 +152,12 @@ async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = Non
         "model": req.model or "agentic-rag",
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": answer
-            },
+            "message": {"role": "assistant", "content": answer},
             "finish_reason": "stop"
         }]
     }
-    
-    # Add sources if available
     if sources:
         response["sources"] = sources
-    
     return response
 
 @app.post("/v1/chat/completions")
@@ -166,33 +168,110 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
             created = int(time.time())
             model = req.model or "agentic-rag"
 
-            # 1) send immediately (prevents OpenWebUI hanging)
+            # Important: send first chunk immediately so OpenWebUI stops showing skeleton.
             yield _sse_chunk(rid, created, model, {"role": "assistant"})
-            await asyncio.sleep(0)
-
-            # 2) compute FULL response using existing non-stream logic
-            full = await chat_non_stream_impl(req, x_conversation_id)
             
-            # Handle error case
-            if "error" in full:
-                yield _sse_chunk(rid, created, model, {"content": f"Error: {full['error']}"}, finish_reason="stop")
-                yield "data: [DONE]\n\n"
-                return
+            # Important: send TRACE immediately so OpenWebUI shows activity.
+            yield _sse_chunk(rid, created, model, {"content": "[TRACE]\n"})
 
-            content = ""
             try:
-                content = full["choices"][0]["message"]["content"]
-            except Exception:
+                # If agent has a native streaming generator, prefer it.
+                if hasattr(agent, "answer_stream"):
+                    async for part in agent.answer_stream(
+                        user_text=next((m.content for m in req.messages[::-1] if m.role == "user"), ""),
+                        raw_messages=[m.model_dump() for m in req.messages],
+                        summary=(store.load(derive_conv_id(req.messages, x_conversation_id)).get("summary","") or ""),
+                        notes=(store.load(derive_conv_id(req.messages, x_conversation_id)).get("notes","") or ""),
+                    ):
+                        # part may be a string, dict, etc. Normalize to string.
+                        normalized_content = _normalize_delta_content(part)
+                        yield _sse_chunk(rid, created, model, {"content": normalized_content})
+                    yield "data: [DONE]\n\n"
+                    return
+
+                # Fallback: compute full and send as single content chunk.
+                # Send heartbeat while computing
+                yield _sse_chunk(rid, created, model, {"content": "[TRACE] Retrieving documents..."})
+                
+                # Background computation with periodic heartbeats
+                async def compute_with_heartbeat():
+                    return await chat_non_stream_impl(req, x_conversation_id)
+                
+                # Run computation with heartbeats every 2 seconds
+                task = asyncio.create_task(compute_with_heartbeat())
+                
+                while not task.done():
+                    yield _sse_chunk(rid, created, model, {"content": " "})  # Heartbeat space
+                    await asyncio.sleep(2)
+                
+                full = await task
+
+                if "error" in full:
+                    yield _sse_chunk(rid, created, model, {"content": f"Error: {full['error']}"}, finish_reason="stop")
+                    yield "data: [DONE]\n\n"
+                    return
+
                 content = ""
+                try:
+                    content = full["choices"][0]["message"]["content"]
+                except Exception:
+                    content = ""
 
-            # 3) send content and done
-            yield _sse_chunk(rid, created, model, {"content": content}, finish_reason="stop")
-            yield "data: [DONE]\n\n"
+                yield _sse_chunk(rid, created, model, {"content": content}, finish_reason="stop")
+                yield "data: [DONE]\n\n"
 
-        return StreamingResponse(gen(), media_type="text/event-stream")
-    
-    # else: existing non-stream return
-    return await chat_non_stream_impl(req, x_conversation_id)
+            except Exception as e:
+                # Always end stream properly.
+                yield _sse_chunk(rid, created, model, {"content": f"Error: {type(e).__name__}: {e}"}, finish_reason="stop")
+                yield "data: [DONE]\n\n"
+
+        headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
+
+    # Non-stream path
+    full = await chat_non_stream_impl(req, x_conversation_id)
+    if isinstance(full, dict) and "error" in full:
+        return JSONResponse(full, status_code=400)
+    return full
 
 # Include ES Proxy Router
 app.include_router(es_router, prefix="/proxy", tags=["es-proxy"])
+
+# Debug SSE endpoint (ChatGPT's debugging suggestion)
+@app.get("/debug/sse")
+async def debug_sse(request: Request):
+    if not ENABLE_DEBUG_ENDPOINTS:
+        raise HTTPException(status_code=404, detail="Not found")
+    async def gen():
+        try:
+            # sofort was senden (verhindert OpenWebUI "graue Streifen")
+            yield "data: [debug] hello\n\n"
+            # heartbeat loop
+            while True:
+                if await request.is_disconnected():
+                    print("[debug_sse] client disconnected")
+                    return
+                yield f"data: [hb] {int(time.time())}\n\n"
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            print("[debug_sse] cancelled")
+            return
+        except Exception as e:
+            print("[debug_sse] EXC:", repr(e))
+            print(traceback.format_exc())
+            # noch versuchen, Fehler als SSE zu senden
+            yield f"data: [error] {repr(e)}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
