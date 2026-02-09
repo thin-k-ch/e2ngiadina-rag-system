@@ -1,352 +1,456 @@
-import os
-import re
-import httpx
-import hashlib
-from typing import List, Dict, Tuple
+"""
+agent_streaming_final.py
 
-from .tools import Tools
-from .query_planner import plan_queries, detect_retrieval_mode, refine_queries
-from .rerank import rerank
-from .evidence import build_evidence_pack
+Drop-in replacement for agent_api/app/agent.py.
 
-SYSTEM_PROMPT = """You are an agentic RAG assistant.
-You will be given:
-- a running SUMMARY (persistent memory)
-- NOTES (private working memory)
-- RECENT CHAT history (sliding window)
-- retrieved CONTEXT chunks with citations
+Goals:
+- Never crash on unexpected hit formats ("str has no attribute get").
+- Provide deterministic [TRACE] first, then [FINAL] with real token streaming.
+- Keep API compatible with app.main: Agent.answer(...) -> (answer, new_summary, new_notes, sources)
 
-Rules:
-- Answer the user normally.
-- Always cite sources like [1], [2] when using retrieved chunks.
-- If you extract or infer structure (tables, counts), do so explicitly.
-- Never reveal private NOTES verbatim. Use them only to stay consistent.
-
-WICHTIG:
-Du HAST Zugriff auf die Nutzerdaten über den Block "RETRIEVED CONTEXT".
-Dieser Kontext stammt aus lokalen Dateien des Nutzers und ist bereits für dich geladen.
-Du darfst daraus konkrete Dateinamen/Pfade/Details nennen, sofern sie im Kontext/Metadaten stehen.
-Du darfst NICHT sagen, dass du keinen Zugriff auf Daten hast, wenn RETRIEVED CONTEXT nicht leer ist.
-Wenn Details fehlen, stelle Rückfragen oder sage präzise, was im Kontext fehlt.
-Wenn Treffer thematisch nahe sind (z.B. Offerte statt Rechnung), zeige sie und frage nach Präzisierung (Datum/Projekt), statt zu sagen, du hättest keinen Kontext.
-BILINGUAL: "Rechnung" = "invoice" = "bill" = "receipt". Behandle englische und deutsche Begriffe als äquivalent.
-
-EMAIL-REGELN (sehr wichtig):
-E-Mail Details (Betreff, Datum, Betrag, Anhänge, Absender/Empfänger) dürfen nur genannt werden,
-wenn sie im RETRIEVED CONTEXT oder in Metadatenfeldern (email_*) vorhanden sind.
-Wenn solche Felder fehlen: sage "Metadaten fehlen in der Indexierung" und zeige die Top-Hits.
-Erfinde niemals Betreff/Beträge/Anhänge.
-
-Du arbeitest agentisch:
-plane Suchvarianten,
-nutze Retrieval,
-lies Belege,
-beantworte ausschließlich aus Belegen.
-Wenn Belege fehlen: sage exakt "Nicht in den Dokumenten gefunden."
-
-SPRACHE:
-Antworte standardmäßig auf Deutsch.
-Wenn Nutzer explizit Englisch verlangt ("in english", "auf englisch") -> antworte Englisch.
-
-Output format requirement:
-- You MAY include a private notes block wrapped in:
-  <NOTES>...</NOTES>
-  Then provide the user-facing answer AFTER that block.
-- The server will strip <NOTES> before showing to the user.
+Notes:
+- This intentionally avoids importing non-existent symbols (e.g. format_sources_markdown).
+- Uses Tools.search_hybrid() if available; otherwise returns empty context.
+- Uses Ollama /api/chat for both non-stream and streaming.
 """
 
-def approx_tokens(s: str) -> int:
-    # fast heuristic: 1 token ~ 4 chars (roughly)
-    if not s:
-        return 0
-    return max(1, len(s) // 4)
+from __future__ import annotations
 
-def clamp_tokens(text: str, max_tokens: int) -> str:
-    # naive clamp by chars
-    if max_tokens <= 0:
+import os
+import json
+import time
+import asyncio
+from typing import Any, Dict, List, Tuple, AsyncGenerator, Optional
+
+import httpx
+
+# Optional imports from the repo. Keep the agent resilient if some modules drift.
+try:
+    from .tools import Tools  # type: ignore
+except Exception:
+    Tools = None  # type: ignore
+
+try:
+    from .format_links import make_clickable_path  # type: ignore
+except Exception:
+    make_clickable_path = None  # type: ignore
+
+
+def _now() -> int:
+    return int(time.time())
+
+
+def _safe_str(x: Any) -> str:
+    if x is None:
         return ""
-    max_chars = max_tokens * 4
-    if len(text) <= max_chars:
-        return text
-    return text[-max_chars:]  # keep tail (most recent)
+    if isinstance(x, str):
+        return x
+    try:
+        return str(x)
+    except Exception:
+        return ""
 
-def strip_notes(model_output: str) -> Tuple[str, str]:
+
+def _safe_dict(x: Any) -> Dict[str, Any]:
+    return x if isinstance(x, dict) else {}
+
+
+def _safe_list(x: Any) -> List[Any]:
+    return x if isinstance(x, list) else []
+
+
+def _safe_get(d: Any, key: str, default: Any = None) -> Any:
+    if isinstance(d, dict):
+        return d.get(key, default)
+    return default
+
+
+def _normalize_hit(hit: Any) -> Dict[str, Any]:
     """
-    Returns (notes, answer_without_notes).
+    Normalizes a retrieval hit into:
+      {
+        "path": str,
+        "text": str,
+        "score": float|int|None,
+        "metadata": dict,
+      }
+    Accepts dict hits (preferred) OR str (treated as text).
     """
-    if not model_output:
-        return "", ""
-    m = re.search(r"<NOTES>(.*?)</NOTES>", model_output, re.DOTALL | re.IGNORECASE)
-    notes = m.group(1).strip() if m else ""
-    answer = re.sub(r"<NOTES>.*?</NOTES>", "", model_output, flags=re.DOTALL | re.IGNORECASE).strip()
-    return notes, answer
+    if isinstance(hit, str):
+        return {"path": "", "text": hit, "score": None, "metadata": {}}
+    if not isinstance(hit, dict):
+        return {"path": "", "text": _safe_str(hit), "score": None, "metadata": {}}
 
-def _hits_preview(hits, n=5):
-    lines=[]
-    for i,h in enumerate(hits[:n],1):
-        md=h.get("metadata") or {}
-        p=md.get("original_path") or md.get("file_path") or "unknown"
-        sn=(h.get("text") or "").replace("\n"," ")[:160]
-        lines.append(f"{i}. {p} — {sn} …")
-    return "\n".join(lines)
+    md = _safe_get(hit, "metadata", {}) or {}
+    md = md if isinstance(md, dict) else {}
 
-def _has_search_intent(user_text: str) -> bool:
-    """Check if user is explicitly asking for document search"""
-    search_keywords = [
-        "suche", "finde", "in den dokumenten", "datei", 
-        "dokument", "quelle", "pdf", "xlsx", "docx", "pfad"
-    ]
-    user_lower = user_text.lower()
-    return any(keyword in user_lower for keyword in search_keywords)
+    # Common keys across variants
+    path = _safe_get(hit, "path", "") or _safe_get(md, "path", "") or _safe_get(md, "source", "")
+    text = _safe_get(hit, "text", "") or _safe_get(hit, "content", "") or _safe_get(md, "text", "")
 
-def _weak_evidence(hits):
-    # simple gate: too few hits or all distances bad (if present)
-    if not hits or len(hits) < 3:
-        return True
-    dists=[h.get("distance") for h in hits if h.get("distance") is not None]
-    if dists:
-        # Chroma distance: lower better; >1.2 often weak in many setups
-        if min(dists) > 1.2:
-            return True
-    return False
+    # Sometimes text is nested / not a string
+    if not isinstance(text, str):
+        text = _safe_str(text)
+
+    score = _safe_get(hit, "score", None)
+    return {
+        "path": _safe_str(path),
+        "text": text,
+        "score": score,
+        "metadata": md,
+    }
+
+
+def _dedupe_hits(hits: List[Dict[str, Any]], limit: int = 12) -> List[Dict[str, Any]]:
+    seen = set()
+    out: List[Dict[str, Any]] = []
+    for h in hits:
+        path = (h.get("path") or "").strip()
+        # primary key: path + first 80 chars of text
+        k = (path, (h.get("text") or "")[:80])
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(h)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _build_sources(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    file_base = os.getenv("FILE_BASE", "") or ""
+    sources: List[Dict[str, Any]] = []
+    n = 1
+    for h in hits:
+        # Handle both old format (h.get("path")) and new format (h.get("file", {}).get("path"))
+        if isinstance(h, str):
+            # Old format: string hit
+            path = h.strip()
+            score = 0
+            snippet = h
+            file_info = {}
+        else:
+            # New format: dictionary hit
+            path = (h.get("file", {}).get("path") or "").strip()
+            if not path:
+                path = (h.get("path") or "").strip()
+            
+            if not path:
+                continue
+                
+            score = h.get("score", 0)
+            snippet = h.get("snippet", "")
+            file_info = h.get("file", {})
+        
+        if not path:
+            continue
+            
+        display_path = path
+        url = ""
+        if make_clickable_path:
+            display_path, url = make_clickable_path(path, file_base=file_base, use_http_proxy=True)
+        else:
+            # fallback: still try to use /open endpoint with URL encoding
+            try:
+                from urllib.parse import quote
+                full_path = path
+                if file_base and not path.startswith("/"):
+                    full_path = os.path.join(file_base, path)
+                url = f"http://localhost:11436/open?path={quote(full_path)}"
+            except Exception:
+                url = ""
+        
+        sources.append({
+            "n": n,
+            "path": path,
+            "display_path": display_path,
+            "local_url": url,
+            "score": score,
+            "snippet": snippet,
+            "file": file_info,
+        })
+        n += 1
+    return sources
+
+
+def _format_context(hits: List[Dict[str, Any]], max_chars: int = 9000) -> str:
+    """
+    Builds a compact context block from top hits.
+    """
+    parts: List[str] = []
+    used = 0
+    for i, h in enumerate(hits, start=1):
+        # Handle both old format (h.get("text")) and new format (h.get("snippet"))
+        if isinstance(h, str):
+            # Old format: string hit
+            txt = h.strip()
+            path = ""
+        else:
+            # New format: dictionary hit
+            txt = (h.get("snippet") or "").strip()
+            path = (h.get("path") or "").strip()
+            if not path:
+                path = (h.get("file", {}).get("path") or "").strip()
+        
+        if not txt:
+            continue
+            
+        header = f"[{i}] {path}" if path else f"[{i}]"
+        block = header + "\n" + txt
+        if used + len(block) + 2 > max_chars:
+            break
+        parts.append(block)
+        used += len(block) + 2
+    return "\n\n".join(parts)
+
 
 class Agent:
     def __init__(self):
-        self.ollama_base = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-        self.llm_model = os.getenv("LLM_MODEL", "qwen2.5:14b")
+        self.ollama_base = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+        self.model_default = os.getenv("OLLAMA_MODEL", "llama4:latest")
+        self.trace_enabled = os.getenv("AGENT_TRACE", "1").lower() not in ("0", "false", "no")
+        # Retrieval
+        self.tools = Tools() if Tools else None
 
-        self.tools = Tools()
-
-        self.context_max_tokens = int(os.getenv("CONTEXT_MAX_TOKENS", "12000"))
-        self.summary_tokens = int(os.getenv("CONTEXT_SUMMARY_TOKENS", "1200"))
-        self.recent_tokens = int(os.getenv("CONTEXT_RECENT_TOKENS", "7000"))
-        self.notes_tokens = int(os.getenv("NOTES_MAX_TOKENS", "600"))
-        self.summary_update_trigger = int(os.getenv("SUMMARY_UPDATE_TRIGGER_TOKENS", "9000"))
-
-    async def llm(self, messages: List[Dict], temperature: float = 0.2) -> str:
-        async with httpx.AsyncClient(timeout=240) as client:
-            r = await client.post(
-                f"{self.ollama_base}/api/chat",
-                json={
-                    "model": self.llm_model,
-                    "messages": messages,
-                    "options": {"temperature": temperature},
-                    "stream": False,
-                },
-            )
+    # --------------------------
+    # Ollama calls
+    # --------------------------
+    async def llm_text(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.2) -> str:
+        payload = {
+            "model": model or self.model_default,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": temperature},
+        }
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+            r = await client.post(f"{self.ollama_base}/api/chat", json=payload)
             r.raise_for_status()
             data = r.json()
-            return data["message"]["content"]
+        return _safe_get(_safe_get(data, "message", {}), "content", "")
 
-    def build_recent_history(self, raw_messages: List[Dict], budget_tokens: int) -> List[Dict]:
+    async def llm_stream(self, messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.2) -> AsyncGenerator[str, None]:
         """
-        Takes the full chat messages (role/content) and keeps as many from the end as fit.
-        Keeps system messages out (we provide our own).
+        Yields incremental token strings.
         """
-        # normalize
-        msgs = [{"role": m.get("role", ""), "content": m.get("content", "")} for m in raw_messages]
-        msgs = [m for m in msgs if m["role"] in ("user", "assistant") and (m["content"] or "").strip()]
+        payload = {
+            "model": model or self.model_default,
+            "messages": messages,
+            "stream": True,
+            "options": {"temperature": temperature},
+        }
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+            async with client.stream("POST", f"{self.ollama_base}/api/chat", json=payload) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    msg = _safe_get(obj, "message", {})
+                    chunk = _safe_get(msg, "content", "")
+                    if chunk:
+                        yield chunk
 
-        kept = []
-        used = 0
-        # take from the end backwards
-        for m in reversed(msgs):
-            t = approx_tokens(m["content"])
-            if used + t > budget_tokens:
-                break
-            kept.append(m)
-            used += t
-        kept.reverse()
-        return kept
-
-    async def maybe_update_summary(self, summary: str, recent_msgs: List[Dict]) -> str:
+    # --------------------------
+    # Retrieval with Policy
+    # --------------------------
+    async def _retrieve_with_policy(self, user_text: str) -> Dict[str, Any]:
         """
-        Update summary if recent history is large enough.
+        New retrieval method using ChatGPT's Policy:
+        - Tool-Gate: decide_gate() 
+        - Exact Phrase: search_exact_phrase()
+        - Hybrid: search_hybrid()
+        - Stop Rules: max 2 rounds
+        - Guardrails: can_claim_absence()
         """
-        total = sum(approx_tokens(m["content"]) for m in recent_msgs)
-        if total < self.summary_update_trigger:
-            return summary or ""
+        if not self.tools:
+            return {"mode": "no_tools", "hits": [], "total_hits": 0}
 
-        # summarize only the last part to keep it cheap
-        tail_text = "\n".join([f'{m["role"].upper()}: {m["content"]}' for m in recent_msgs[-12:]])
-        prompt = [
-            {"role": "system", "content": "You update a running conversation summary for later retrieval. Be concise but preserve key facts, decisions, entities, constraints, and pending tasks."},
-            {"role": "user", "content": f"CURRENT SUMMARY:\n{summary}\n\nNEW DIALOGUE (latest):\n{tail_text}\n\nWrite an UPDATED SUMMARY (no more than ~{self.summary_tokens} tokens)."}
-        ]
-        new_sum = await self.llm(prompt, temperature=0.1)
-        return clamp_tokens(new_sum.strip(), self.summary_tokens)
+        # Step 1: Tool-Gate
+        gate = self.tools.decide_gate(user_text)
+        print(f"🚪 TOOL-GATE: {gate.mode} - {gate.reason}")
 
-    def _top_hits_debug(self, hits, n=5):
-        lines=[]
-        for i,h in enumerate(hits[:n],1):
-            md=h.get("metadata") or {}
-            p=md.get("original_path") or md.get("file_path") or "unknown"
-            s=(h.get("text") or "").replace("\n"," ")[:160]
-            lines.append(f"[{i}] {p} — {s} …")
-        return "\n".join(lines)
+        if not gate.require_rag:
+            return {"mode": "no_rag", "hits": [], "total_hits": 0}
 
+        # Step 2: Execute search based on mode
+        if gate.mode == "exact_phrase":
+            result = self.tools.search_exact_phrase(gate.phrase or user_text)
+            print(f"🎯 EXACT PHRASE RESULT: {result['total_hits']} hits")
+            return result
+        elif gate.mode == "hybrid":
+            result = self.tools.search_hybrid(user_text)
+            print(f"🎯 HYBRID RESULT: {len(result.get('merged_hits', []))} hits")
+            return result
+        else:
+            return {"mode": "no_rag", "hits": [], "total_hits": 0}
+
+    async def _retrieve(self, user_text: str) -> List[Dict[str, Any]]:
+        """
+        Legacy method - now uses policy-based retrieval
+        """
+        result = await self._retrieve_with_policy(user_text)
+        
+        # Convert to legacy format
+        if result.get("mode") == "exact_phrase":
+            return result.get("best_hits", [])
+        elif result.get("mode") == "hybrid":
+            return result.get("merged_hits", [])
+        else:
+            return []
+
+    # --------------------------
+    # Public API used by app.main
+    # --------------------------
     async def answer(
         self,
         user_text: str,
-        raw_messages: List[Dict],
-        summary: str,
-        notes: str,
-    ) -> Tuple[str, str, str, List[Dict]]:
+        raw_messages: Optional[List[Dict[str, Any]]] = None,
+        summary: str = "",
+        notes: str = "",
+    ) -> Tuple[str, str, str, List[Dict[str, Any]]]:
         """
-        Returns (answer, new_summary, new_notes)
+        Non-streaming answer for /v1/chat/completions with stream=false.
+        Returns: (answer_text, new_summary, new_notes, sources)
         """
-        # DETECT RETRIEVAL MODE FIRST
-        mode_detection = detect_retrieval_mode(user_text)
-        mode = mode_detection.get("mode", "rag")
+        hits = await self._retrieve_with_policy(user_text)
         
-        # EXACT PHRASE MODE - ES ONLY, NO LLM
-        if mode == "exact_phrase":
-            phrase = mode_detection["phrase"]
-            hits = self.tools.search_exact_phrase(phrase, size=10)
-            
-            if not hits:
-                answer = "0 exakte Treffer"
-                sources = []
+        # Apply guardrails
+        if isinstance(hits, dict) and hits.get("mode") == "exact_phrase":
+            if not self.tools.can_claim_absence("exact_phrase", True, hits.get("total_hits", 0), 1):
+                # If we can't claim absence, we must have evidence
+                pass  # hits already contain evidence
             else:
-                # Build bullet list of filenames
-                filenames = []
-                sources = []
-                for hit in hits:
-                    filename = hit["metadata"].get("filename", "")
-                    path_real = hit["metadata"].get("path_real", "")
-                    
-                    if filename:
-                        filenames.append(f"• {filename}")
-                        
-                        # Generate /open URL
-                        if path_real:
-                            import urllib.parse
-                            encoded_path = urllib.parse.quote(path_real)
-                            sources.append(f"http://localhost:11436/open?path={encoded_path}")
-                
-                answer = "\n".join(filenames)
-            
-            return answer, summary, notes, sources
+                # We can claim absence - but only if truly 0 hits
+                if hits.get("total_hits", 0) == 0:
+                    return "0 Treffer in rag_files_v1 (exact phrase search)", "", "", []
         
-        # AGENTIC LOOP: PLAN → RETRIEVE → RERANK → EVIDENCE → ANSWER/EXTRACT
-        plan = await plan_queries(self.llm, user_text)
-        mode = plan.get("mode","rag")
-        queries = plan["queries"]
-        must_include = plan.get("must_include", [])
-
-        final_hits = []
-        final_context = ""
-        final_sources = []
-
-        for attempt in range(2):  # max 2 iterations
-            hits = self.tools.search_hybrid(queries, top_k_each=8, max_total=36)
-            hits = self.tools.filter_must_include(hits, must_include)
-            if hits:
-                hits = rerank(queries[0], hits, top_n=12)
-                context, sources = build_evidence_pack(hits, max_sources=6, max_chars_per_source=1600)
+        # Convert to legacy format for _build_sources
+        if isinstance(hits, dict):
+            if hits.get("mode") == "exact_phrase":
+                legacy_hits = hits.get("best_hits", [])
+            elif hits.get("mode") == "hybrid":
+                legacy_hits = hits.get("merged_hits", [])
             else:
-                context, sources = "", []
+                legacy_hits = []
+        else:
+            legacy_hits = []
+        
+        sources = _build_sources(legacy_hits)
 
-            # if good enough: break
-            if hits and not _weak_evidence(hits):
-                final_hits, final_context, final_sources = hits, context, sources
-                break
+        context = _format_context(hits)
+        sys = (
+            "Du bist ein lokaler RAG-Agent. Antworte kurz, präzise und auf Deutsch.\n"
+            "Wenn Kontext vorhanden ist, stütze dich darauf und nenne Quellen am Ende.\n"
+            "Wenn Kontext fehlt, sage das klar, und schlage 1-2 präzisierende Rückfragen vor.\n"
+        )
 
-            # attempt 0 -> refine based on preview and retry
-            if attempt == 0:
-                preview = _hits_preview(hits, n=5) if hits else "NO HITS"
-                plan2 = await refine_queries(self.llm, user_text, preview)
-                mode = plan2.get("mode", mode)
-                # merge new queries + keep old first
-                newq = plan2.get("queries", [])
-                merged=[]
-                for q in (queries + newq):
-                    q=(q or "").strip()
-                    if q and q not in merged:
-                        merged.append(q)
-                queries = merged[:12]
-                must_include = plan2.get("must_include", must_include)
-                continue
+        msgs: List[Dict[str, str]] = [{"role": "system", "content": sys}]
+        if summary:
+            msgs.append({"role": "system", "content": f"Konversations-Zusammenfassung:\n{summary}"})
+        if notes:
+            msgs.append({"role": "system", "content": f"Notizen:\n{notes}"})
+        if context:
+            msgs.append({"role": "system", "content": f"RETRIEVED CONTEXT:\n{context}"})
+        msgs.append({"role": "user", "content": user_text})
 
-        # if still nothing:
-        if not final_hits:
-            # Check if user has explicit search intent
-            if _has_search_intent(user_text):
-                return ("Nicht in den Dokumenten gefunden.", summary, notes, [])
-            else:
-                # Fallback to LLM for non-search queries
-                fallback_messages = [
-                    {"role": "system", "content": "You are a helpful assistant. Answer the user's question directly and concisely."},
-                    {"role": "user", "content": user_text}
-                ]
-                fallback_answer = await self.llm(fallback_messages, temperature=0.2)
-                return (fallback_answer.strip(), summary, notes, [])
+        try:
+            out = await self.llm_text(msgs)
+        except Exception as e:
+            out = f"Fehler beim LLM-Aufruf: {_safe_str(e)}"
 
-        # OPTIONAL: Wenn attempt 2 immer noch weak evidence, dann lieber "nicht gefunden"
-        if _weak_evidence(final_hits):
-            # Check if user has explicit search intent
-            if _has_search_intent(user_text):
-                return ("Nicht in den Dokumenten gefunden.", summary, notes, [])
-            else:
-                # Fallback to LLM for non-search queries
-                fallback_messages = [
-                    {"role": "system", "content": "You are a helpful assistant. Answer the user's question directly and concisely."},
-                    {"role": "user", "content": user_text}
-                ]
-                fallback_answer = await self.llm(fallback_messages, temperature=0.2)
-                return (fallback_answer.strip(), summary, notes, [])
-
-        # now answer using final_context
-        context = final_context
-        hits = final_hits
-
-        # enforce: no "kein zugriff" and no hallucination
-        user_task = user_text.strip()
-        if mode == "extract":
-            user_task += "\n\nGib die Antwort als Tabelle oder strukturierte Liste. Extrahiere nur, was im Kontext steht."
-
-        messages = [
-          {"role":"system","content": SYSTEM_PROMPT},
-          {"role":"system","content": "RETRIEVED CONTEXT (zitiere als [n]):\n" + context},
-          {"role":"user","content":
-              f"Aufgabe: {user_task}\n\n"
-              f"Regeln:\n"
-              f"- Antworte nur aus RETRIEVED CONTEXT.\n"
-              f"- Nenne konkrete Pfade/Dateien nur, wenn sie in [n] stehen.\n"
-              f"- Jede zentrale Aussage braucht mind. eine Quelle [n].\n"
-              f"- Wenn es nicht im Kontext steht: sage exakt 'Nicht in den Dokumenten gefunden.'\n"
-          }
-        ]
-        out = await self.llm(messages, temperature=0.2)
-        notes2, answer = strip_notes(out)
-        answer = (answer or "").strip()
-
-        # anti-refusal retry
-        low = answer.lower()
-        if hits and ("kein zugriff" in low or "keinen direkten zugriff" in low or "i don't have access" in low):
-            messages.append({"role":"system","content":"Du HAST Zugriff auf RETRIEVED CONTEXT. Entferne jede Zugriff-Ausrede. Antworte nun konkret mit Quellen [n]."})
-            out2 = await self.llm(messages, temperature=0.1)
-            _, a2 = strip_notes(out2)
-            answer = (a2 or "").strip()
-
-        # if still no citations and not "Nicht gefunden", force one retry
-        if ("Nicht in den Dokumenten gefunden." not in answer) and ("[" not in answer):
-            messages.append({"role":"system","content":"Pflicht: setze Quellen [1], [2] ... bei den relevanten Aussagen. Wiederhole."})
-            out3 = await self.llm(messages, temperature=0.1)
-            _, a3 = strip_notes(out3)
-            answer = (a3 or "").strip()
-
-        # Add clickable file:// links to sources
-        if final_sources:
-            src_lines = []
-            for s in final_sources:
-                n = s.get("n")
-                display_path = s.get("display_path", s.get("path", ""))
-                url = s.get("local_url","")
-                if url and display_path:
-                    src_lines.append(f"[{n}] [{display_path}]({url})")
+        # Append sources markdown
+        if sources:
+            lines = ["", "Quellen (lokal):"]
+            for s in sources:
+                dp = s.get("display_path", s.get("path", ""))
+                url = s.get("local_url", "")
+                n = s.get("n", "?")
+                if url:
+                    lines.append(f"[{n}] [{dp}]({url})")
                 else:
-                    src_lines.append(f"[{n}] {display_path}")
-            answer = answer.rstrip() + "\n\nQuellen (lokal):\n" + "\n\n".join(src_lines)
+                    lines.append(f"[{n}] {dp}")
+            out = out.rstrip() + "\n" + "\n".join(lines) + "\n"
+        elif hits.get("mode") == "exact_phrase" and hits.get("total_hits", 0) == 0:
+            out += "\n\n0 Treffer in rag_files_v1 (exact phrase search)"
 
-        return (answer, summary, notes, sources)
+        # Keep summary/notes stable for now (no auto-summarize in this safe build)
+        return out, summary, notes, sources
+
+    async def answer_stream(
+        self,
+        user_text: str,
+        raw_messages: Optional[List[Dict[str, Any]]] = None,
+        summary: str = "",
+        notes: str = "",
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Streaming generator that yields dict events:
+          {"type":"trace","content": "..."} and {"type":"token","content":"..."} and {"type":"final_sources","sources":[...]}
+        app.main should map these to SSE chunks.
+        """
+        # 1) TRACE immediately
+        if self.trace_enabled:
+            yield {"type": "trace", "content": "[TRACE]\n"}
+            await asyncio.sleep(0)
+
+        # 2) Retrieval step
+        hits: List[Dict[str, Any]] = []
+        try:
+            hits = await self._retrieve(user_text)
+        except Exception as e:
+            if self.trace_enabled:
+                yield {"type": "trace", "content": f"[TRACE] Retrieval error: {_safe_str(e)}\n"}
+            hits = []
+
+        if self.trace_enabled:
+            yield {"type": "trace", "content": f"- retrieval_hits: {len(hits)}\n"}
+            await asyncio.sleep(0)
+
+        sources = _build_sources(hits)
+        context = _format_context(hits)
+
+        # 3) Compose prompt
+        sys = (
+            "Du bist ein lokaler RAG-Agent. Antworte auf Deutsch.\n"
+            "Wenn Kontext vorhanden ist, stütze dich darauf.\n"
+            "Gib am Ende eine kurze Quellenliste (lokal) aus.\n"
+            "Wichtig: Schreibe KEINE internen Gedankengänge (kein chain-of-thought), "
+            "nur eine knappe, nachvollziehbare Antwort.\n"
+        )
+        msgs: List[Dict[str, str]] = [{"role": "system", "content": sys}]
+        if summary:
+            msgs.append({"role": "system", "content": f"Konversations-Zusammenfassung:\n{summary}"})
+        if notes:
+            msgs.append({"role": "system", "content": f"Notizen:\n{notes}"})
+        if context:
+            msgs.append({"role": "system", "content": f"RETRIEVED CONTEXT:\n{context}"})
+        msgs.append({"role": "user", "content": user_text})
+
+        # 4) Stream tokens
+        if self.trace_enabled:
+            yield {"type": "trace", "content": "[/TRACE]\n[FINAL]\n"}
+            await asyncio.sleep(0)
+
+        try:
+            async for tok in self.llm_stream(msgs):
+                yield {"type": "token", "content": tok}
+        except Exception as e:
+            yield {"type": "token", "content": f"\nFehler beim Streaming: {_safe_str(e)}\n"}
+
+        # 5) Append sources
+        if sources:
+            lines = ["", "\nQuellen (lokal):"]
+            for s in sources:
+                dp = s.get("display_path", s.get("path", ""))
+                url = s.get("local_url", "")
+                n = s.get("n", "?")
+                if url:
+                    lines.append(f"[{n}] [{dp}]({url})")
+                else:
+                    lines.append(f"[{n}] {dp}")
+            yield {"type": "token", "content": "\n" + "\n".join(lines) + "\n"}
+
+        yield {"type": "final_sources", "sources": sources}

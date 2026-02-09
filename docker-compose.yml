@@ -44,6 +44,8 @@ services:
       - FILE_BASE=/media/felix/RAG/1
       - ES_URL=http://elasticsearch:9200
       - ES_INDEX=rag_files_v1
+      - ES_HOST=http://elasticsearch:9200
+      - CHROMA_HOST=localhost:8000
     volumes:
       - /media/felix/RAG/1/volumes/chroma:/chroma
       - /media/felix/RAG/1/volumes/logs:/logs
@@ -85,6 +87,8 @@ services:
       - EWS_META_DB=/mail/ews-db.sqlite
       - ES_URL=http://elasticsearch:9200
       - ES_INDEX=rag_files_v1
+      - ES_HOST=http://elasticsearch:9200
+      - CHROMA_HOST=localhost:8000
       - CHROMA_COLLECTION=documents
       - ES_BATCH=1000
     volumes:
