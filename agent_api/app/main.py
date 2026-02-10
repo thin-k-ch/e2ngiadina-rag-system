@@ -159,15 +159,37 @@ def health():
     }
 
 @app.get("/v1/models")
-def models():
-    return {
-        "object": "list",
-        "data": [
-            {"id": "agentic-rag", "object": "model", "created": 0, "owned_by": "local"},
-            {"id": "agentic-rag-strategy", "object": "model", "created": 0, "owned_by": "local"},
-            {"id": "agentic-rag-deep", "object": "model", "created": 0, "owned_by": "local"}
-        ]
-    }
+async def models():
+    """List available models from Ollama + RAG variants"""
+    try:
+        # Fetch models from Ollama
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{ollama_base}/api/tags")
+            ollama_models = r.json().get("models", [])
+        
+        # Format for OpenAI-compatible response
+        data = []
+        for m in ollama_models:
+            model_id = m.get("name", m.get("model", ""))
+            data.append({
+                "id": model_id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "ollama"
+            })
+        
+        return {"object": "list", "data": data}
+    except Exception as e:
+        # Fallback to static list if Ollama unreachable
+        return {
+            "object": "list",
+            "data": [
+                {"id": "llama4:latest", "object": "model", "created": 0, "owned_by": "ollama"},
+                {"id": "apertus:70b-instruct-2509-q4_k_m", "object": "model", "created": 0, "owned_by": "ollama"},
+                {"id": "qwen2.5:3b", "object": "model", "created": 0, "owned_by": "ollama"},
+            ]
+        }
 
 @app.get("/open")
 async def open_file(path: str):
@@ -205,11 +227,17 @@ async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = Non
         user_text = user_text.replace("[ADVANCED]", "").strip()
     
     if use_simple_rag:
-        # MVP: Simple RAG Pipeline
+        # MVP: Simple RAG Pipeline - use selected model
+        selected_model = req.model or "llama4:latest"
+        
+        # Create pipeline with selected model
+        from .rag_pipeline import create_pipeline
+        pipeline = create_pipeline("simple", model=selected_model)
+        
         answer_parts = []
         sources = []
         
-        async for event in simple_rag.run(user_text, summary, notes):
+        async for event in pipeline.run(user_text, summary, notes):
             if event.type == "token":
                 answer_parts.append(event.data.get("content", ""))
             elif event.type == "complete":
@@ -284,11 +312,15 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
             try:
                 user_text = next((m.content for m in req.messages[::-1] if m.role == "user"), "")
                 
-                # MVP: SimpleRAG for streaming too (consistent with non-streaming)
+                # MVP: SimpleRAG with selected model
+                selected_model = model or "llama4:latest"
+                from .rag_pipeline import create_pipeline
+                pipeline = create_pipeline("simple", model=selected_model)
+                
                 answer_parts = []
                 sources = []
                 
-                async for event in simple_rag.run(user_text, "", ""):
+                async for event in pipeline.run(user_text, "", ""):
                     if event.type == "token":
                         content = event.data.get("content", "")
                         answer_parts.append(content)
