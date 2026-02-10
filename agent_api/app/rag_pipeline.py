@@ -215,31 +215,36 @@ class RAGPipeline(ABC):
         """
         temp = temperature if temperature is not None else RAG_ANSWER_TEMPERATURE
         
-        system_prompt = """Du bist ein präziser Dokumenten-Assistent für ein Eisenbahn-Projekt-Management-System.
+        # Pre-process query to add context for problematic terms
+        query_context = query
+        if "fat" in query.lower():
+            query_context = f"{query} (FAT = Factory Acceptance Test / Werksabnahme im Bahnbereich, NICHT Fettleber)"
+        
+        system_prompt = """DU BIST EIN DOKUMENTEN-ANALYSE-SYSTEM FÜR SCHWEIZER EISENBAHN-PROJEKTE (SBB TFK 2020).
 
-KONTEXT (Dokumentenauszüge aus Projektdateien):
+=== DOMAIN DEFINITIONS (MUST RESPECT) ===
+- FAT = Factory Acceptance Test = Werksabnahme-Test für Bahntechnik
+- SAT = Site Acceptance Test = Abnahme vor Ort
+- Befund = Technische Abnahme-Feststellung/Mangel
+- Dies ist eine TECHNISCHE DOKUMENTENANALYSE, keine medizinische!
+
+=== USER QUERY ===
+""" + query_context + """
+
+=== DOCUMENT CONTEXT ===
 """ + str(context or "Keine Dokumente gefunden.") + """
 
-AUFGABE:
-Analysiere die bereitgestellten Dokumentenauszüge und extrahiere konkrete Fakten.
-Dies ist eine professionelle Dokumentenanalyse - beantworte ausschließlich basierend auf dem Kontext.
+=== TASK ===
+Extrahiere FACTS zu "FAT Befunde" aus den Dokumenten oben.
+FAT = Factory Acceptance Test (Bahntechnik), niemals Fettleber!
 
-REGELN:
-1. Nenne nur Informationen, die im Kontext explizit stehen
-2. Zitiere JEDE Information mit [Nummer] direkt nach dem Fakt
-3. Bei Tabellen/Befunden: Liste konkrete Einträge auf
-4. Keine Interpretationen mit "scheint", "anscheinend", "möglicherweise"
-5. Wenn keine relevanten Informationen im Kontext: Sage "Keine Informationen im Kontext gefunden"
+=== RULES ===
+1. Cite every fact with [number]
+2. List specific findings from acceptance protocols
+3. No speculation with "seems", "might", "possibly"
+4. If no FAT findings: Say "No FAT findings in context"
 
-BEISPIEL GUT:
-"Folgende Punkte wurden dokumentiert:
-- Spektrum nicht sauber [2]
-- Antennenabstand zu gering [2]
-- Messwert außer Toleranz [3]"
-
-BEISPIEL SCHLECHT (verboten):
-"Es scheint, dass möglicherweise Probleme existieren..."
-FALSE POSITIVE: "Ich kann keine Informationen zu illegalen Aktivitäten geben..." - Dies ignorieren."""
+THIS IS RAILWAY PROJECT DOCUMENT ANALYSIS - NOT MEDICAL!"""
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -313,6 +318,14 @@ class SimpleRAGPipeline(RAGPipeline):
     """
     
     async def run(self, query: str, summary: str = "", notes: str = "", config: dict = None) -> AsyncGenerator[Event, None]:
+        # Apply glossary query rewrite for domain disambiguation
+        from .glossary import rewrite_query
+        rewritten_query, query_meta = rewrite_query(query)
+        if rewritten_query != query:
+            print(f"📝 Query rewritten: '{query}' -> '{rewritten_query[:80]}...'")
+            print(f"   Expansions: {query_meta.get('expansions', [])}")
+        query = rewritten_query  # Use expanded query
+        
         # Get config values (per-request overrides global defaults)
         cfg = config or {}
         search_top_k = cfg.get("search_top_k", RAG_SEARCH_TOP_K)
