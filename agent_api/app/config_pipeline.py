@@ -28,7 +28,7 @@ RAG_EXCEL_PENALTY_IRRELEVANT = float(os.getenv("RAG_EXCEL_PENALTY_IRRELEVANT", "
 RAG_PDF_MSG_BONUS = float(os.getenv("RAG_PDF_MSG_BONUS", "1.0"))  # Bonus for PDF/MSG/DOCX
 
 # Context Phase
-RAG_MAX_CONTEXT_DOCS = int(os.getenv("RAG_MAX_CONTEXT_DOCS", "40"))  # How many docs to include in LLM context
+RAG_MAX_CONTEXT_DOCS = int(os.getenv("RAG_MAX_CONTEXT_DOCS", "10"))  # How many docs to include in LLM context
 RAG_MAX_SNIPPET_LENGTH = int(os.getenv("RAG_MAX_SNIPPET_LENGTH", "2000"))  # Max chars per snippet
 
 # Sources Phase

@@ -201,6 +201,7 @@ async def models():
                 {"id": "rag-llama4:latest", "object": "model", "created": 0, "owned_by": "rag-pipeline"},
                 {"id": "rag-apertus:70b-instruct-2509-q4_k_m", "object": "model", "created": 0, "owned_by": "rag-pipeline"},
                 {"id": "rag-qwen2.5:3b", "object": "model", "created": 0, "owned_by": "rag-pipeline"},
+                {"id": "rag-gpt-oss:latest", "object": "model", "created": 0, "owned_by": "rag-pipeline"},
             ]
         }
 
