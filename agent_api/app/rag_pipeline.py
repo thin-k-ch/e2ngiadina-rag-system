@@ -26,6 +26,19 @@ from typing import AsyncGenerator, Dict, Any, List, Optional
 import os
 import httpx
 import asyncio
+from .config_pipeline import (
+    RAG_SEARCH_TOP_K,
+    RAG_KEYWORDS,
+    RAG_KEYWORD_BOOST_PATH,
+    RAG_KEYWORD_BOOST_SNIPPET,
+    RAG_KEYWORD_COMPOUND_BONUS,
+    RAG_EXCEL_PENALTY_RELEVANT,
+    RAG_EXCEL_PENALTY_IRRELEVANT,
+    RAG_EXCEL_RELEVANT_KEYWORDS,
+    RAG_PDF_MSG_BONUS,
+    RAG_MAX_CONTEXT_DOCS,
+    RAG_MAX_SOURCES,
+)
 
 
 class Event:
@@ -78,7 +91,7 @@ class RAGPipeline(ABC):
         """
         pass
     
-    async def _search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
+    async def _search(self, query: str, top_k: int = None) -> List[Dict[str, Any]]:
         """
         Search documents. Override for custom search logic.
         
@@ -87,6 +100,7 @@ class RAGPipeline(ABC):
             - snippet: text snippet
             - score: relevance score
         """
+        top_k = top_k or RAG_SEARCH_TOP_K
         # Default: hybrid search via tools
         result = await asyncio.to_thread(
             self.tools.search_hybrid,
@@ -117,7 +131,7 @@ class RAGPipeline(ABC):
         Returns sorted list with boosted scores.
         """
         query_lower = query.lower()
-        keywords = ["fat", "sat", "befund", "abnahme", "test", "prüfung", "mängel"]
+        keywords = RAG_KEYWORDS
         
         def relevance_score(hit):
             path = hit.get("path", "").lower()
@@ -128,28 +142,28 @@ class RAGPipeline(ABC):
             keyword_count = 0
             for kw in keywords:
                 if kw in path:
-                    boost += 2.0  # Strong path boost
+                    boost += RAG_KEYWORD_BOOST_PATH
                     keyword_count += 1
                 if kw in snippet:
-                    boost += 1.0  # Content boost
+                    boost += RAG_KEYWORD_BOOST_SNIPPET
                     keyword_count += 1
             
             # Extra boost for multiple keywords (compound match)
             if keyword_count >= 2:
-                boost += 3.0
+                boost += RAG_KEYWORD_COMPOUND_BONUS
             
             # PENALTY: Excel files get lower priority - BUT less penalty if path contains relevant keywords
             if path.endswith(('.xlsx', '.xls')):
                 # Check if Excel filename contains relevant keywords
-                excel_relevant = any(kw in path for kw in ['befund', 'fat', 'sat', 'abnahme', 'test', 'prüfung'])
+                excel_relevant = any(kw in path for kw in RAG_EXCEL_RELEVANT_KEYWORDS)
                 if excel_relevant:
-                    boost -= 1.0  # Small penalty for relevant Excel files (still in game)
+                    boost += RAG_EXCEL_PENALTY_RELEVANT
                 else:
-                    boost -= 4.0  # Large penalty for irrelevant Excel files (Stundenabrechnung etc.)
+                    boost += RAG_EXCEL_PENALTY_IRRELEVANT
             
             # BONUS: PDF/MSG documents preferred for real content
             if path.endswith(('.pdf', '.msg', '.docx')):
-                boost += 1.0
+                boost += RAG_PDF_MSG_BONUS
                 
             return base_score + boost
         
@@ -283,7 +297,7 @@ class SimpleRAGPipeline(RAGPipeline):
     async def run(self, query: str, summary: str = "", notes: str = "") -> AsyncGenerator[Event, None]:
         # Phase 1: Search - get more hits for better coverage
         yield Event("phase_start", phase="search")
-        hits = await self._search(query, top_k=40)  # 40 instead of 20
+        hits = await self._search(query)  # Uses RAG_SEARCH_TOP_K
         yield Event("progress", message=f"Found {len(hits)} documents")
         
         # Rank hits with keyword boosting
@@ -293,10 +307,10 @@ class SimpleRAGPipeline(RAGPipeline):
         top_paths = [h.get("path", "") for h in ranked_hits[:5]]
         print(f"📊 TOP 5 RANKED: {top_paths}")
         
-        # Phase 2: Build Context (top 20 from 40)
+        # Phase 2: Build Context (uses RAG_MAX_CONTEXT_DOCS)
         yield Event("phase_start", phase="context")
-        context = self._build_context(ranked_hits, max_docs=20)
-        yield Event("context_built", doc_count=len(ranked_hits[:20]), context_length=len(context))
+        context = self._build_context(ranked_hits, max_docs=RAG_MAX_CONTEXT_DOCS)
+        yield Event("context_built", doc_count=len(ranked_hits[:RAG_MAX_CONTEXT_DOCS]), context_length=len(context))
         
         # Phase 3: Generate Answer (streaming)
         yield Event("phase_start", phase="answer")
@@ -306,9 +320,9 @@ class SimpleRAGPipeline(RAGPipeline):
                 answer_parts.append(event.data.get("content", ""))
                 yield event
             elif event.type == "complete":
-                # Build sources from RANKED hits (top 40 for comprehensive overview)
+                # Build sources from RANKED hits (uses RAG_MAX_SOURCES)
                 sources = []
-                for i, hit in enumerate(ranked_hits[:40], 1):
+                for i, hit in enumerate(ranked_hits[:RAG_MAX_SOURCES], 1):
                     sources.append({
                         "n": i,
                         "path": hit.get("path", hit.get("file", {}).get("path", "")),
