@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "browser-gpt": {
+      "command": "node",
+      "args": ["/home/felix/chatgpt-mcp-v2.js"],
+      "env": {
+        "NODE_PATH": "/home/felix/node_modules"
+      }
+    }
+  }
+}

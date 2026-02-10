@@ -1,0 +1,163 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: e2ngiadina-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./volumes/ollama:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  agent_api:
+    build:
+      context: ./agent_api
+      dockerfile: Dockerfile
+    container_name: e2ngiadina-api
+    ports:
+      - "11436:11436"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - LLM_MODEL=llama4:latest
+      - EMBED_MODEL=all-MiniLM-L6-v2
+      - CHROMA_PATH=/chroma
+      - COLLECTION=documents
+      - PYRUNNER_URL=http://runner:9000/run
+      - TOP_K=10
+      - MAX_STEPS=6
+      - LOG_PATH=/logs/agent_api.log
+      - CONTEXT_MAX_TOKENS=12000
+      - CONTEXT_SUMMARY_TOKENS=1200
+      - CONTEXT_RECENT_TOKENS=7000
+      - NOTES_MAX_TOKENS=600
+      - SUMMARY_UPDATE_TRIGGER_TOKENS=9000
+      - STATE_PATH=/state
+      - FILE_BASE=/media/felix/RAG/1
+      - ES_URL=http://elasticsearch:9200
+      - ES_INDEX=rag_files_v1
+    volumes:
+      - /media/felix/RAG/1/volumes/chroma:/chroma
+      - /media/felix/RAG/1/volumes/logs:/logs
+      - /media/felix/RAG/1/volumes/state:/state
+      - /media/felix/RAG/1:/media/felix/RAG/1
+    depends_on:
+      - ollama
+      - runner
+      - elasticsearch
+    restart: unless-stopped
+
+  indexer:
+    build:
+      context: ./indexer
+      dockerfile: Dockerfile
+    container_name: e2ngiadina-indexer
+    environment:
+      - ROOT_DIR=/data
+      - CHROMA_PATH=/chroma
+      - COLLECTION=documents
+      - COLLECTION_DOCX=documents_docx
+      - COLLECTION_TXT=documents_txt
+      - COLLECTION_MSG=documents_msg
+      - COLLECTION_MAIL=documents_mail
+      - COLLECTION_MAIL_EWS=documents_mail_ews
+      - EMBED_MODEL=all-MiniLM-L6-v2
+      - CHUNK_SIZE=1200
+      - CHUNK_OVERLAP=180
+      - MANIFEST_PATH=/manifest/manifest.sqlite3
+      - LOG_PATH=/logs/indexer.log
+      - MIN_TEXT_CHARS=200
+      - WORKERS=6
+      - BATCH_UPSERT=256
+      - ZIP_MAX_DEPTH=2
+      - MAIL_ROOT=/mail
+      - EWS_BODIES_DB=/mail/ews-bodies.sqlite
+      - EWS_META_DB=/mail/ews-db.sqlite
+      - ES_URL=http://elasticsearch:9200
+      - ES_INDEX=rag_files_v1
+      - CHROMA_COLLECTION=documents
+      - ES_BATCH=1000
+    volumes:
+      - /media/felix/RAG/1:/data:ro
+      - /media/felix/RAG/1/volumes/chroma:/chroma
+      - /media/felix/RAG/1/volumes/manifest:/manifest
+      - /media/felix/RAG/1/volumes/logs:/logs
+      - /home/felix/snap/thunderbird/common/.thunderbird/60gutlhs.default/ExQuilla/outlook.office365.com:/mail:ro
+    depends_on:
+      - ollama
+    restart: "no"
+
+  runner:
+    build:
+      context: ./runner
+      dockerfile: Dockerfile
+    container_name: e2ngiadina-runner
+    ports:
+      - "9000:9000"
+    environment:
+      - NO_INTERNET=1
+      - TIMEOUT_SECONDS=25
+      - LOG_PATH=/logs/runner.log
+    volumes:
+      - /media/felix/RAG/1/volumes/logs:/logs
+    restart: unless-stopped
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.2
+    container_name: agentic-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ./volumes/esdata:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.2
+    container_name: agentic-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: e2ngiadina-openwebui
+    ports:
+      - "8086:8086"
+    environment:
+      # Ollama direkt (für Standard-Modelle)
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - ENABLE_OLLAMA_API=true
+      - SHOW_OLLAMA_MODELS=true
+      # OpenAI-compatible zusätzliche API(s) - unser agentic-rag
+      - OPENAI_API_BASE_URLS=http://agent_api:11436/v1
+      - OPENAI_API_KEYS=local
+      # Allgemeine Settings
+      - WEBUI_SECRET_KEY=your-secret-key-here
+      - DEFAULT_MODELS=agentic-rag,llama4:latest
+      - PORT=8086
+    depends_on:
+      - agent_api
+      - ollama
+    restart: unless-stopped
+
+networks:
+  default:
+    name: agentic_default

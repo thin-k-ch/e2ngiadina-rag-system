@@ -1,0 +1,215 @@
+import os
+import re
+import time
+import json
+import hashlib
+import asyncio
+import httpx
+import traceback
+from typing import List, Dict, Tuple, Any, AsyncGenerator
+
+from .tools import Tools
+from .query_planner import plan_queries, detect_retrieval_mode, refine_queries
+from .format_links import format_sources_markdown
+
+SYSTEM_PROMPT = """You are an agentic RAG assistant.
+You will be given:
+- a running SUMMARY (persistent memory)
+- NOTES (private working memory)
+- RECENT CHAT history (sliding window)
+- retrieved CONTEXT chunks with citations
+
+Rules:
+- Answer the user normally.
+- Always cite sources like [1], [2] when using retrieved chunks.
+- Never reveal private NOTES verbatim. Use them only to stay consistent.
+
+WICHTIG:
+Du HAST Zugriff auf die Nutzerdaten über den Block "RETRIEVED CONTEXT".
+Dieser Kontext stammt aus lokalen Dateien des Nutzers und ist bereits für dich geladen.
+Du darfst daraus konkrete Dateinamen/Pfade/Details nennen, sofern sie im Kontext/Metadaten stehen.
+Du darfst NICHT sagen, dass du keinen Zugriff auf Daten hast, wenn RETRIEVED CONTEXT nicht leer ist.
+"""
+
+def _clamp(s: str, n: int) -> str:
+    if not s:
+        return ""
+    return s[-n:]
+
+def _safe_dict(x: Any) -> Dict:
+    return x if isinstance(x, dict) else {}
+
+def _norm_hit(h: Any) -> Dict:
+    """Normalize a retrieval hit to a dict shape used across the app."""
+    if isinstance(h, dict):
+        # ensure keys exist
+        h.setdefault("metadata", {})
+        return h
+    if isinstance(h, str):
+        return {"id": None, "text": h, "metadata": {}}
+    # unknown type
+    return {"id": None, "text": str(h), "metadata": {}}
+
+def _norm_source(src: Any, n: int) -> Dict:
+    if isinstance(src, dict):
+        d = dict(src)
+        d.setdefault("n", n)
+        d.setdefault("path", d.get("display_path") or d.get("path") or "")
+        d.setdefault("display_path", d.get("display_path") or d.get("path") or "")
+        d.setdefault("local_url", d.get("local_url") or "")
+        return d
+    if isinstance(src, str):
+        return {"n": n, "path": src, "display_path": src, "local_url": ""}
+    return {"n": n, "path": str(src), "display_path": str(src), "local_url": ""}
+
+def _build_sources_from_hits(hits: List[Dict], max_sources: int = 12) -> List[Dict]:
+    sources: List[Dict] = []
+    seen = set()
+    for h in hits:
+        md = _safe_dict(h.get("metadata"))
+        # support both old and new metadata naming
+        path_real = md.get("path_real") or md.get("original_path") or md.get("file_path") or md.get("path") or ""
+        filename = md.get("filename") or os.path.basename(path_real) if path_real else ""
+        display = md.get("display_path") or path_real or filename or "unknown"
+        if not display or display in seen:
+            continue
+        seen.add(display)
+        # local_url might already be precomputed by indexer; if not, main.py serves /open?path=
+        local_url = md.get("local_url") or ""
+        sources.append({"path": display, "display_path": display, "local_url": local_url})
+        if len(sources) >= max_sources:
+            break
+    # number them
+    return [_norm_source(s, i) for i, s in enumerate(sources, 1)]
+
+def strip_notes(model_output: str) -> Tuple[str, str]:
+    if not model_output:
+        return "", ""
+    m = re.search(r"<NOTES>(.*?)</NOTES>", model_output, re.DOTALL | re.IGNORECASE)
+    notes = m.group(1).strip() if m else ""
+    answer = re.sub(r"<NOTES>.*?</NOTES>", "", model_output, flags=re.DOTALL | re.IGNORECASE).strip()
+    return notes, answer
+
+class Agent:
+    """
+    Minimal, robust Agent implementation:
+    - Always normalizes hits/sources so we never crash on `'str' object has no attribute 'get'`
+    - Keeps existing query planning (if available)
+    - Produces stable answer + sources for OpenWebUI
+    """
+    def __init__(self):
+        self.ollama_base = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+        # prefer llama4 for your setup; can be overridden
+        self.llm_model = os.getenv("LLM_MODEL", "llama4:latest")
+        self.embed_model = os.getenv("EMBED_MODEL", "mxbai-embed-large:latest")
+        self.summary_tokens = int(os.getenv("SUMMARY_TOKENS", "900"))
+        self.notes_tokens = int(os.getenv("NOTES_TOKENS", "900"))
+        self.context_max_chars = int(os.getenv("CONTEXT_MAX_CHARS", "35000"))
+        self.debug = os.getenv("AGENT_DEBUG_TRACE", "0") == "1"
+        self.tools = Tools()
+
+    async def llm_text(self, messages: List[Dict], temperature: float = 0.2) -> str:
+        payload = {
+            "model": self.llm_model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": temperature},
+        }
+        async with httpx.AsyncClient(timeout=600) as client:
+            r = await client.post(f"{self.ollama_base}/api/chat", json=payload)
+            r.raise_for_status()
+            data = r.json()
+            return (data.get("message") or {}).get("content", "") or ""
+
+    async def update_summary(self, raw_messages: List[Dict], summary: str) -> str:
+        # Keep it cheap and robust: summarize last ~12 turns only
+        recent = raw_messages[-12:] if raw_messages else []
+        tail = "\n".join([f'{m.get("role","").upper()}: {m.get("content","")}' for m in recent])
+        prompt = [
+            {"role": "system", "content": "You update a running conversation summary for later retrieval. Be concise but preserve key facts, decisions, entities, constraints, and pending tasks."},
+            {"role": "user", "content": f"CURRENT SUMMARY:\n{summary}\n\nNEW DIALOGUE (latest):\n{tail}\n\nWrite an UPDATED SUMMARY (no more than ~{self.summary_tokens} tokens)."}
+        ]
+        out = await self.llm_text(prompt, temperature=0.1)
+        return _clamp(out.strip(), self.summary_tokens * 6)  # rough char clamp
+
+    async def build_rag(self, user_text: str) -> Tuple[str, List[Dict], str]:
+        # retrieval mode detection
+        mode_detection = detect_retrieval_mode(user_text)
+        mode = (mode_detection or {}).get("mode", "rag")
+        queries: List[str] = []
+        try:
+            if mode == "exact_phrase":
+                phrase = mode_detection.get("phrase") if isinstance(mode_detection, dict) else None
+                phrase = phrase or user_text
+                hits = self.tools.search_exact_phrase(phrase, size=10)
+                hits = [_norm_hit(h) for h in (hits or [])]
+                context = "\n\n".join([h.get("text","") for h in hits if h.get("text")])[: self.context_max_chars]
+                return mode, hits, context
+            # normal rag planning
+            queries = plan_queries(user_text) or []
+            queries = refine_queries(user_text, queries) or queries
+        except Exception:
+            queries = [user_text]
+
+        # hybrid search
+        hits_raw = self.tools.search_hybrid(queries, top_k_each=8, max_total=36)
+        hits = [_norm_hit(h) for h in (hits_raw or [])]
+        context_chunks = []
+        for h in hits[:12]:
+            t = (h.get("text") or "").strip()
+            if t:
+                context_chunks.append(t)
+        context = "\n\n---\n\n".join(context_chunks)
+        context = context[: self.context_max_chars]
+        return "rag", hits, context
+
+    async def answer(
+        self,
+        user_text: str,
+        raw_messages: List[Dict],
+        summary: str,
+        notes: str,
+    ):
+        try:
+            mode, hits, context = await self.build_rag(user_text)
+
+            sources = _build_sources_from_hits(hits)
+            # Build recent chat tail for continuity
+            recent = raw_messages[-10:] if raw_messages else []
+            recent_text = "\n".join([f'{m.get("role","").upper()}: {m.get("content","")}' for m in recent])
+
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": f"SUMMARY:\n{summary}".strip()},
+                {"role": "system", "content": f"NOTES (private, do not reveal):\n{notes}".strip()},
+                {"role": "system", "content": f"RECENT CHAT:\n{recent_text}".strip()},
+                {"role": "system", "content": f"RETRIEVED CONTEXT:\n{context}".strip()},
+                {"role": "user", "content": user_text},
+            ]
+
+            out = await self.llm_text(messages, temperature=0.2)
+            notes2, answer = strip_notes(out)
+            answer = (answer or "").strip()
+
+            # Update memories (cheap)
+            new_summary = await self.update_summary(raw_messages, summary)
+            new_notes = _clamp((notes + "\n" + notes2).strip(), self.notes_tokens * 6)
+
+            # Append sources markdown (also returned structurally)
+            if sources:
+                md = format_sources_markdown(sources)
+                answer = answer.rstrip() + "\n\nQuellen (lokal):\n" + md
+
+            return answer, new_summary, new_notes, sources
+
+        except Exception as e:
+            if self.debug:
+                tb = traceback.format_exc()
+                print("[EXC] Agent.answer crashed:\n" + tb, flush=True)
+            return f"Error: {e}", summary, notes, []
+
+    # Optional: if you later wire main.py to stream agent output token-by-token
+    async def answer_stream(self, *args, **kwargs) -> AsyncGenerator[str, None]:
+        # For now, keep a safe single-shot stream:
+        ans, new_sum, new_notes, sources = await self.answer(*args, **kwargs)
+        yield ans

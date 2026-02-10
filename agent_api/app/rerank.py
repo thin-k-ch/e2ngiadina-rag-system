@@ -4,7 +4,13 @@ from rapidfuzz import fuzz
 def _tok(s: str):
     return [t for t in (s or "").lower().split() if t]
 
-def rerank(query: str, hits: list, top_n: int = 8):
+def rerank(query: str, hits: list, top_n: int = 8, top_k: int | None = None, **kwargs):
+    # Accept alias 'top_k' used by some callers (map to top_n) and ignore extra kwargs
+    if top_k is not None:
+        try:
+            top_n = int(top_k)
+        except Exception:
+            pass
     # hits: [{"text":..., "metadata":..., "distance":...}]
     texts = [(h.get("text") or "") for h in hits]
     corpus = [_tok(t) for t in texts]

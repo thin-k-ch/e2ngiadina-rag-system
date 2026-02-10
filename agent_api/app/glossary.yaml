@@ -1,0 +1,67 @@
+# Domain Glossary for TFK 2020 Project
+# Defines acronyms, synonyms, and disambiguation rules
+
+acronyms:
+  FAT:
+    meaning: "Factory Acceptance Test"
+    avoid: "File Allocation Table"
+    synonyms:
+      de: ["Werksabnahme", "Abnahmetest", "FAT Test", "FAT-Protokoll"]
+      en: ["Factory Acceptance Test", "Factory Acceptance", "FAT"]
+    context_signals: ["SBB", "TFK", "Tunnelfunk", "Abnahme", "Test", "Protokoll", "Prüfung", "Manteldokument"]
+    
+  SAT:
+    meaning: "Site Acceptance Test"
+    synonyms:
+      de: ["Standortabnahme", "Bauabnahme", "SAT Test"]
+      en: ["Site Acceptance Test", "Site Acceptance"]
+    context_signals: ["Installation", "Vor-Ort", "Betrieb", "Inbetriebnahme"]
+    
+  TFK:
+    meaning: "Tunnelfunkkonzept"
+    synonyms:
+      de: ["TFK 2020", "Tunnelfunk Konzept", "SBB TFK"]
+      en: ["Tunnel Radio Concept", "TFK2020"]
+    
+  IPMA:
+    meaning: "International Project Management Association"
+    synonyms:
+      de: ["IPMA Zertifizierung", "IPMA Level", "Projektmanagement IPMA"]
+      en: ["IPMA Certification", "IPMA Level A/B/C/D"]
+    
+domain_terms:
+  tunnelfunk:
+    synonyms: ["Tunnelfunk", "Tunnel-Funk", "BOS-Funk", "TETRA", "Funkanlage", "Notruf"]
+    related: ["FAT", "SAT", "Abnahme", "Prüfung"]
+    
+  manteldokument:
+    synonyms: ["Manteldokument", "Manteldokumente", "Systembeschreibung", "Systemdokumentation"]
+    related: ["FAT", "Anforderungen", "Spezifikation"]
+    
+  pruefprotokoll:
+    synonyms: ["Prüfprotokoll", "Prüfprotokolle", "Testprotokoll", "Abnahmeprotokoll"]
+    related: ["FAT", "SAT", "Befund", "Fehler"]
+
+# Disambiguation rules
+rules:
+  - if: "query contains 'FAT' AND any(context_signals)"
+    then: "FAT = Factory Acceptance Test"
+    rewrite: "FAT OR Werksabnahme OR 'Factory Acceptance Test'"
+    exclude: "'File Allocation Table' filesystem"
+    
+  - if: "query contains 'FAT' AND NOT any(context_signals)"
+    then: "ask user for clarification or search both"
+
+# Search weights for document fields
+field_boosts:
+  file.filename: 5.0
+  file.extension: 1.0
+  path.virtual: 2.0
+  content: 3.0
+  
+# Domain-aware reranking
+rerank_weights:
+  has_domain_term: 2.0
+  is_manteldokument: 1.5
+  has_fat_content: 1.3
+  has_protocol_content: 1.2

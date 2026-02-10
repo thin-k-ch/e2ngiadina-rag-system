@@ -25,8 +25,16 @@ services:
     ports:
       - "11436:11436"
     environment:
+      - PYTHONPATH=/app
       - OLLAMA_BASE_URL=http://ollama:11434
+      # Multi-Model Configuration
       - LLM_MODEL=llama4:latest
+      - LLM_MODEL_STRATEGY=qwen2.5:7b
+      - LLM_MODEL_ANSWER=llama4:latest
+      - OLLAMA_MODEL_STRATEGY=qwen2.5:7b
+      - OLLAMA_MODEL_ANSWER=llama4:latest
+      - OLLAMA_MODEL_ANALYSIS=qwen2.5:3b
+      # Embedding and other settings
       - EMBED_MODEL=all-MiniLM-L6-v2
       - ENABLE_DEBUG_ENDPOINTS=0
       - CHROMA_PATH=/chroma
@@ -167,7 +175,7 @@ services:
       - PORT=8086
       # User Management
       - DEFAULT_USER_ROLE=admin
-      - ENABLE_SIGNUP=false
+      - ENABLE_SIGNUP=true
       - ENABLE_LOGIN=true
       - WEBUI_AUTH=True
       - ENABLE_PERSISTENT_CONFIG=False

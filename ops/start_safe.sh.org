@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMPOSE_DIR="${COMPOSE_DIR:-/media/felix/RAG/AGENTIC}"
+BOOT_GATE="${BOOT_GATE:-/media/felix/RAG/AGENTIC/ops/boot_gate.sh}"
+
+fail() { echo "❌ START FAIL: $*" >&2; exit 1; }
+ok()   { echo "✅ $*"; }
+
+cd "$COMPOSE_DIR" || fail "Cannot cd to $COMPOSE_DIR"
+
+echo "=== START: AGENTIC stack boot ==="
+docker compose config >/dev/null || fail "docker compose config invalid"
+
+echo "Bringing stack up..."
+docker compose up -d || fail "docker compose up -d failed"
+ok "docker compose up -d done"
+
+echo
+echo "=== Running BOOT-GATE ==="
+[[ -x "$BOOT_GATE" ]] || fail "boot_gate.sh not found or not executable: $BOOT_GATE"
+"$BOOT_GATE"
+

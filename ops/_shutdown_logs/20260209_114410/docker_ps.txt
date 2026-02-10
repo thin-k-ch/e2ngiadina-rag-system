@@ -1,0 +1,7 @@
+CONTAINER ID   IMAGE                                                  COMMAND                  CREATED             STATUS                          PORTS                                                   NAMES
+844d64c9fb53   ghcr.io/open-webui/open-webui:v0.3.18                  "bash start.sh"          About an hour ago   Up About an hour (healthy)      8080/tcp, 0.0.0.0:8086->8086/tcp, [::]:8086->8086/tcp   e2ngiadina-openwebui
+8c8e5b182948   agentic-agent_api                                      "uvicorn app.main:ap…"   About an hour ago   Restarting (1) 11 seconds ago                                                           e2ngiadina-api
+1226637c0a7b   docker.elastic.co/kibana/kibana:8.12.2                 "/bin/tini -- /usr/l…"   About an hour ago   Up 24 minutes                   0.0.0.0:5601->5601/tcp, [::]:5601->5601/tcp             agentic-kibana
+56c2a5e42a2d   ollama/ollama:latest                                   "/bin/ollama serve"      About an hour ago   Up About an hour                0.0.0.0:11434->11434/tcp, [::]:11434->11434/tcp         e2ngiadina-ollama
+b7b4eff58dc0   docker.elastic.co/elasticsearch/elasticsearch:8.12.2   "/bin/tini -- /usr/l…"   About an hour ago   Up 25 minutes                   0.0.0.0:9200->9200/tcp, [::]:9200->9200/tcp, 9300/tcp   agentic-elasticsearch
+e380c432b557   agentic-runner                                         "uvicorn app.run:app…"   About an hour ago   Up About an hour                0.0.0.0:9000->9000/tcp, [::]:9000->9000/tcp             e2ngiadina-runner

@@ -32,8 +32,11 @@ def build_evidence_pack(hits: list, max_sources: int = 6, max_chars_per_source: 
             txt = (h.get("text") or "").strip()
             if not txt:
                 continue
-            if total + len(txt) > max_chars_per_source:
-                txt = txt[:max(0, max_chars_per_source-total)]
+            remaining_chars = max_chars_per_source - total
+            if remaining_chars > 0:
+                txt = txt[:remaining_chars]
+            else:
+                continue  # Überspringen, wenn kein Platz mehr
             if txt:
                 taken.append(txt)
                 total += len(txt)

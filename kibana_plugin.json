@@ -1,0 +1,14 @@
+{
+  "name": "simple-search",
+  "version": "1.0.0",
+  "description": "Simple Elasticsearch Search Interface",
+  "server": true,
+  "ui": true,
+  "configPath": ["simple_search"],
+  "requiredPlugins": [],
+  "requiredBundles": [],
+  "owner": {
+    "name": "RAG System",
+    "githubTeam": "rag-system"
+  }
+}

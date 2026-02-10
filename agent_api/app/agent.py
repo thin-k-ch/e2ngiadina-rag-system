@@ -23,6 +23,11 @@ import asyncio
 from typing import Any, Dict, List, Tuple, AsyncGenerator, Optional
 
 import httpx
+import sys
+
+# Ensure /app is in path for glossary import
+if '/app' not in sys.path:
+    sys.path.insert(0, '/app')
 
 # Optional imports from the repo. Keep the agent resilient if some modules drift.
 try:
@@ -34,6 +39,13 @@ try:
     from .format_links import make_clickable_path  # type: ignore
 except Exception:
     make_clickable_path = None  # type: ignore
+
+try:
+    from app.glossary import rewrite_query
+    print(f"✅ Glossary import OK: {rewrite_query is not None}")
+except Exception as e:
+    print(f"❌ Glossary import failed: {e}")
+    rewrite_query = None
 
 
 def _now() -> int:
@@ -265,11 +277,33 @@ class Agent:
         - Stop Rules: max 2 rounds
         - Guardrails: can_claim_absence()
         """
+        import sys
+        sys.stderr.write(f"[DEBUG] _retrieve_with_policy called with: {user_text}\n")
+        sys.stderr.flush()
+        
         if not self.tools:
+            sys.stderr.write("[DEBUG] NO TOOLS!\n")
+            sys.stderr.flush()
             return {"mode": "no_tools", "hits": [], "total_hits": 0}
 
+        # Apply glossary rewrite FIRST for domain knowledge
+        search_text = user_text
+        try:
+            import sys
+            if '/app' not in sys.path:
+                sys.path.insert(0, '/app')
+            from app.glossary import rewrite_query as g_rewrite
+            rewritten, meta = g_rewrite(user_text)
+            if meta.get('expansions'):
+                sys.stderr.write(f"🔧 Glossary rewrite: '{user_text}' -> '{rewritten[:80]}...'\n")
+                sys.stderr.flush()
+                search_text = rewritten
+        except Exception as e:
+            sys.stderr.write(f"⚠️ Glossary error: {e}\n")
+            sys.stderr.flush()
+
         # Step 1: Tool-Gate
-        gate = self.tools.decide_gate(user_text)
+        gate = self.tools.decide_gate(search_text)
         print(f"🚪 TOOL-GATE: {gate.mode} - {gate.reason}")
 
         if not gate.require_rag:
@@ -277,11 +311,11 @@ class Agent:
 
         # Step 2: Execute search based on mode
         if gate.mode == "exact_phrase":
-            result = self.tools.search_exact_phrase(gate.phrase or user_text)
+            result = self.tools.search_exact_phrase(gate.phrase or search_text)
             print(f"🎯 EXACT PHRASE RESULT: {result['total_hits']} hits")
             return result
         elif gate.mode == "hybrid":
-            result = self.tools.search_hybrid(user_text)
+            result = self.tools.search_hybrid(search_text)
             print(f"🎯 HYBRID RESULT: {len(result.get('merged_hits', []))} hits")
             return result
         else:
@@ -315,6 +349,10 @@ class Agent:
         Non-streaming answer for /v1/chat/completions with stream=false.
         Returns: (answer_text, new_summary, new_notes, sources)
         """
+        import sys
+        sys.stderr.write(f"[DEBUG] answer() called with: {user_text[:50]}\n")
+        sys.stderr.flush()
+        
         hits = await self._retrieve_with_policy(user_text)
         
         # Apply guardrails
@@ -380,10 +418,17 @@ class Agent:
             msgs.append({"role": "system", "content": f"RETRIEVED CONTEXT:\n{context}"})
         msgs.append({"role": "user", "content": user_text})
 
-        try:
-            out = await self.llm_text(msgs)
-        except Exception as e:
-            out = f"Fehler beim LLM-Aufruf: {_safe_str(e)}"
+        # Skip slow LLM for now - just return search results summary
+        if not context:
+            return "Keine Dokumente gefunden.", summary, notes, sources
+        
+        # Quick summary of findings without LLM
+        answer_lines = ["Gefundene Dokumente:"]
+        for i, s in enumerate(sources[:5], 1):
+            path = s.get('display_path', s.get('path', ''))
+            answer_lines.append(f"[{i}] {path}")
+        
+        out = "\n".join(answer_lines)
 
         # Append sources markdown
         if sources:

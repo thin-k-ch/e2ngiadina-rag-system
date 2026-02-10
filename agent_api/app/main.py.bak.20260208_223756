@@ -1,0 +1,199 @@
+import os
+import time
+import hashlib
+import json
+import asyncio
+from fastapi import FastAPI, Header, Request
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
+
+from .agent import Agent
+from .state import StateStore
+from .es_proxy import router as es_router
+
+app = FastAPI(title="AGENTIC RAG API (OpenAI-compatible subset)")
+agent = Agent()
+
+STATE_PATH = os.getenv("STATE_PATH", "/state")
+
+
+def _sse_chunk(rid: str, created: int, model: str, delta: dict, finish_reason=None) -> str:
+    """OpenAI-compatible SSE chunk wrapper."""
+    chunk = {
+        "id": rid,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason
+        }]
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+
+store = StateStore(STATE_PATH)
+
+
+class Message(BaseModel):
+    role: str
+    content: str
+
+
+class ChatReq(BaseModel):
+    model: str | None = None
+    messages: list[Message]
+    stream: bool | None = False
+
+
+def derive_conv_id(messages: list[Message], x_conversation_id: str | None) -> str:
+    if x_conversation_id and x_conversation_id.strip():
+        return x_conversation_id.strip()
+
+    joined = "\n".join([f"{m.role}:{m.content}" for m in messages])[:2000]
+    h = hashlib.sha1(joined.encode("utf-8", errors="ignore")).hexdigest()
+    return f"conv_{h[:16]}"
+
+
+@app.get("/health")
+def health():
+    return {"ok": True, "service": "agent_api", "time": int(time.time())}
+
+
+@app.get("/v1/models")
+def models():
+    return {
+        "object": "list",
+        "data": [{"id": "agentic-rag", "object": "model", "created": 0, "owned_by": "local"}]
+    }
+
+
+@app.get("/open")
+async def open_file(path: str):
+    """
+    File proxy endpoint to serve local files via HTTP
+    Security: Only serves files under FILE_BASE if set
+    """
+    file_base = os.getenv("FILE_BASE", "")
+
+    if file_base and not path.startswith(file_base):
+        return {"error": "Access denied - path outside base directory"}
+
+    normalized_path = os.path.normpath(path)
+
+    if not os.path.exists(normalized_path):
+        return {"error": "File not found"}
+
+    if not os.path.isfile(normalized_path):
+        return {"error": "Path is not a file"}
+
+    return FileResponse(normalized_path)
+
+
+async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = None):
+    """Non-streaming chat implementation."""
+    if not req.messages:
+        return {"error": "No messages provided"}
+
+    conv_id = derive_conv_id(req.messages, x_conversation_id)
+    state = store.load(conv_id)
+    summary = state.get("summary", "") or ""
+    notes = state.get("notes", "") or ""
+
+    user_text = ""
+    for m in req.messages[::-1]:
+        if m.role == "user":
+            user_text = m.content
+            break
+
+    answer, new_summary, new_notes, sources = await agent.answer(
+        user_text=user_text,
+        raw_messages=[m.model_dump() for m in req.messages],
+        summary=summary,
+        notes=notes,
+    )
+
+    store.save(conv_id, new_summary, new_notes)
+
+    response = {
+        "id": f"agentic_{int(time.time())}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": req.model or "agentic-rag",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": answer},
+            "finish_reason": "stop"
+        }]
+    }
+
+    if sources:
+        response["sources"] = sources
+
+    return response
+
+
+@app.post("/v1/chat/completions")
+async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = Header(default=None)):
+    # STREAMING PATH: TRUE streaming via agent.answer_stream (async generator)
+    if bool(getattr(req, "stream", False)):
+        async def gen():
+            rid = f"agentic_{int(time.time())}"
+            created = int(time.time())
+            model = req.model or "agentic-rag"
+
+            # Load conversation state (best-effort; state persistence during streaming is optional)
+            conv_id = derive_conv_id(req.messages, x_conversation_id)
+            state = store.load(conv_id)
+            summary = state.get("summary", "") or ""
+            notes = state.get("notes", "") or ""
+
+            user_text = ""
+            for m in req.messages[::-1]:
+                if m.role == "user":
+                    user_text = m.content
+                    break
+
+            # Send immediately to prevent UI skeleton
+            yield _sse_chunk(rid, created, model, {"role": "assistant"})
+            await asyncio.sleep(0)
+
+            try:
+                # Iterate the async generator (DO NOT await)
+                async for piece in agent.answer_stream(
+                    user_text=user_text,
+                    raw_messages=[m.model_dump() for m in req.messages],
+                    summary=summary,
+                    notes=notes,
+                ):
+                    # ALWAYS include a `content` key (even if empty)
+                    content = piece if piece else ""
+                    yield _sse_chunk(rid, created, model, {"content": content})
+                    await asyncio.sleep(0)
+
+                # NOTE: If you want to persist summary/notes for streaming too,
+                # add a structured return channel from answer_stream (e.g. via an object),
+                # then store.save(conv_id, new_summary, new_notes) here.
+
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                yield _sse_chunk(rid, created, model, {"content": f"Error: {e}"}, finish_reason="stop")
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # NON-STREAM PATH
+    return await chat_non_stream_impl(req, x_conversation_id)
+
+
+# Include ES Proxy Router
+app.include_router(es_router, prefix="/proxy", tags=["es-proxy"])

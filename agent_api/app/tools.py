@@ -97,7 +97,7 @@ class Tools:
             highlight = (h.get("highlight", {}) or {}).get(ES_CONTENT_FIELD, [])
             snippet = " ".join(highlight) if highlight else ""
 
-            path = self._get(src, "meta.real.path", None) or self._get(src, "path.real", None)
+            path = self._get(src, "path.virtual", None) or self._get(src, "meta.real.path", None) or self._get(src, "path.real", None)
             filename = self._get(src, "file.filename", None)
             ext = self._get(src, "file.extension", None)
 

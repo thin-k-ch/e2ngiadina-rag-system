@@ -13,6 +13,8 @@ ES_SOURCE_FIELDS = [
     "file.extension", 
     "meta.real.path",
     "meta.real.virtual",
+    "path.virtual",
+    "path.real",
 ]
 
 DEFAULT_EXT_FILTER = ["md", "txt", "rst", "log", "json", "yaml", "yml", "pdf", "docx", "doc", "msg", "eml", "xlsx", "xls", "pptx", "ppt"]

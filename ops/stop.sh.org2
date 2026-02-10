@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/media/felix/RAG/AGENTIC"
+cd "$ROOT"
+
+echo "=== STOP: AGENTIC stack graceful shutdown ==="
+
+# 0) Docker daemon erreichbar?
+if ! docker info >/dev/null 2>&1; then
+  echo "ERROR: docker daemon not reachable."
+  exit 2
+fi
+
+echo "Current compose services:"
+docker compose ps || true
+echo
+
+# 1) Graceful down
+echo "Stopping stack (docker compose down)..."
+docker compose down
+
+# 2) Verify nothing left from this stack
+echo
+echo "Checking leftover containers (should be none from this stack)..."
+LEFT="$(docker ps --format '{{.Names}}' | grep -E 'agent_api|elasticsearch|openwebui|ollama|kibana|indexer' || true)"
+if [[ -n "$LEFT" ]]; then
+  echo "WARN: Some related containers still running:"
+  echo "$LEFT"
+  echo "If these belong to this stack, stop them before reboot."
+  exit 3
+fi
+
+# 3) Flush FS buffers
+sync
+
+echo
+echo "=== STOP OK ==="
+echo "Safe to reboot/shutdown the host now."

@@ -1,0 +1,644 @@
+import os
+import re
+import httpx
+import hashlib
+from typing import List, Dict, Tuple
+
+
+def _safe_get(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return default
+
+def _safe_dict(obj):
+    return obj if isinstance(obj, dict) else {}
+
+def _norm_source(src):
+    """Normalize source: handle dict or string"""
+    if isinstance(src, str):
+        return {"n": 1, "display_path": src, "local_url": "", "path": src}
+    return src
+
+def _norm_hit(h):
+    """Normalize hybrid/rerank hits: allow dict or string path."""
+    if isinstance(h, str):
+        return {"path": h, "text": "", "score": None}
+    return h
+
+import traceback
+
+from .tools import Tools
+from .query_planner import plan_queries, detect_retrieval_mode, refine_queries
+from .rerank import rerank
+from .evidence import build_evidence_pack
+
+SYSTEM_PROMPT = """You are an agentic RAG assistant.
+You will be given:
+- a running SUMMARY (persistent memory)
+- NOTES (private working memory)
+- RECENT CHAT history (sliding window)
+- retrieved CONTEXT chunks with citations
+
+Rules:
+- Answer the user normally.
+- Always cite sources like [1], [2] when using retrieved chunks.
+- If you extract or infer structure (tables, counts), do so explicitly.
+- Never reveal private NOTES verbatim. Use them only to stay consistent.
+
+WICHTIG:
+Du HAST Zugriff auf die Nutzerdaten über den Block "RETRIEVED CONTEXT".
+Dieser Kontext stammt aus lokalen Dateien des Nutzers und ist bereits für dich geladen.
+Du darfst daraus konkrete Dateinamen/Pfade/Details nennen, sofern sie im Kontext/Metadaten stehen.
+Du darfst NICHT sagen, dass du keinen Zugriff auf Daten hast, wenn RETRIEVED CONTEXT nicht leer ist.
+Wenn Details fehlen, stelle Rückfragen oder sage präzise, was im Kontext fehlt.
+Wenn Treffer thematisch nahe sind (z.B. Offerte statt Rechnung), zeige sie und frage nach Präzisierung (Datum/Projekt), statt zu sagen, du hättest keinen Kontext.
+BILINGUAL: "Rechnung" = "invoice" = "bill" = "receipt". Behandle englische und deutsche Begriffe als äquivalent.
+
+EMAIL-REGELN (sehr wichtig):
+E-Mail Details (Betreff, Datum, Betrag, Anhänge, Absender/Empfänger) dürfen nur genannt werden,
+wenn sie im RETRIEVED CONTEXT oder in Metadatenfeldern (email_*) vorhanden sind.
+Wenn solche Felder fehlen: sage "Metadaten fehlen in der Indexierung" und zeige die Top-Hits.
+Erfinde niemals Betreff/Beträge/Anhänge.
+
+Du arbeitest agentisch:
+plane Suchvarianten,
+nutze Retrieval,
+lies Belege,
+beantworte ausschließlich aus Belegen.
+Wenn Belege fehlen: sage exakt "Nicht in den Dokumenten gefunden."
+
+SPRACHE:
+Antworte standardmäßig auf Deutsch.
+Wenn Nutzer explizit Englisch verlangt ("in english", "auf englisch") -> antworte Englisch.
+
+Output format requirement:
+- You MAY include a private notes block wrapped in:
+  <NOTES>...</NOTES>
+  Then provide the user-facing answer AFTER that block.
+- The server will strip <NOTES> before showing to the user.
+"""
+
+def approx_tokens(s: str) -> int:
+    # fast heuristic: 1 token ~ 4 chars (roughly)
+    if not s:
+        return 0
+    return max(1, len(s) // 4)
+
+def clamp_tokens(text: str, max_tokens: int) -> str:
+    # naive clamp by chars
+    if max_tokens <= 0:
+        return ""
+    max_chars = max_tokens * 4
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]  # keep tail (most recent)
+
+def strip_notes(model_output: str) -> Tuple[str, str]:
+    """
+    Returns (notes, answer_without_notes).
+    """
+    if not model_output:
+        return "", ""
+    m = re.search(r"<NOTES>(.*?)</NOTES>", model_output, re.DOTALL | re.IGNORECASE)
+    notes = m.group(1).strip() if m else ""
+    answer = re.sub(r"<NOTES>.*?</NOTES>", "", model_output, flags=re.DOTALL | re.IGNORECASE).strip()
+    return notes, answer
+
+def _hits_preview(hits, n=5):
+    lines=[]
+    for i,h in enumerate(hits[:n],1):
+        h=_norm_hit(h)
+        md=_safe_dict(_safe_get(h,"metadata",{}))
+        p=_safe_get(md,"original_path") or _safe_get(md,"file_path") or "unknown"
+        sn=((_safe_get(h,"text","") or "")).replace("\n"," ")[:160]
+        lines.append(f"{i}. {p} — {sn} …")
+    return "\n".join(lines)
+
+def _has_search_intent(user_text: str) -> bool:
+    """Check if user is explicitly asking for document search"""
+    search_keywords = [
+        "suche", "finde", "in den dokumenten", "datei", 
+        "dokument", "quelle", "pdf", "xlsx", "docx", "pfad"
+    ]
+    user_lower = user_text.lower()
+    return any(keyword in user_lower for keyword in search_keywords)
+
+def _weak_evidence(hits):
+    # simple gate: too few hits or all distances bad (if present)
+    if not hits or len(hits) < 3:
+        return True
+    dists=[_safe_get(_norm_hit(h),"distance") for h in hits if _safe_get(_norm_hit(h),"distance") is not None]
+    if dists:
+        # Chroma distance: lower better; >1.2 often weak in many setups
+        if min(dists) > 1.2:
+            return True
+    return False
+
+class Agent:
+    def __init__(self):
+        self.ollama_base = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+        self.llm_model = os.getenv("LLM_MODEL", "qwen2.5:14b")
+
+        self.tools = Tools()
+
+        self.context_max_tokens = int(os.getenv("CONTEXT_MAX_TOKENS", "12000"))
+        self.summary_tokens = int(os.getenv("CONTEXT_SUMMARY_TOKENS", "1200"))
+        self.recent_tokens = int(os.getenv("CONTEXT_RECENT_TOKENS", "7000"))
+        self.notes_tokens = int(os.getenv("NOTES_MAX_TOKENS", "600"))
+        self.summary_update_trigger = int(os.getenv("SUMMARY_UPDATE_TRIGGER_TOKENS", "9000"))
+
+    async def llm_text(self, messages: List[Dict], temperature: float = 0.2) -> str:
+        """Non-streaming LLM call - returns complete text"""
+        async with httpx.AsyncClient(timeout=240) as client:
+            r = await client.post(
+                f"{self.ollama_base}/api/chat",
+                json={
+                    "model": self.llm_model,
+                    "messages": messages,
+                    "options": {"temperature": temperature},
+                    "stream": False,
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+            return data["message"]["content"]
+
+    async def llm_stream(self, messages: List[Dict], temperature: float = 0.2):
+        """Streaming LLM call - yields text chunks as they arrive"""
+        async with httpx.AsyncClient(timeout=240) as client:
+            async with client.stream(
+                "POST",
+                f"{self.ollama_base}/api/chat",
+                json={
+                    "model": self.llm_model,
+                    "messages": messages,
+                    "options": {"temperature": temperature},
+                    "stream": True,
+                },
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.strip():
+                        # Ollama streaming format: each line is a JSON object
+                        try:
+                            data = json.loads(line)
+                            if "message" in data and "content" in data["message"]:
+                                content = data["message"]["content"]
+                                if content:  # Only yield non-empty content
+                                    yield content
+                            # Check for completion
+                            if data.get("done", False):
+                                break
+                        except json.JSONDecodeError:
+                            continue
+
+    def build_recent_history(self, raw_messages: List[Dict], budget_tokens: int) -> List[Dict]:
+        """
+        Takes the full chat messages (role/content) and keeps as many from the end as fit.
+        Keeps system messages out (we provide our own).
+        """
+        # normalize
+        msgs = [{"role": _safe_get(m,"role",""), "content": _safe_get(m,"content","")} for m in raw_messages]
+        msgs = [m for m in msgs if m["role"] in ("user", "assistant") and (m["content"] or "").strip()]
+
+        kept = []
+        used = 0
+        # take from the end backwards
+        for m in reversed(msgs):
+            t = approx_tokens(m["content"])
+            if used + t > budget_tokens:
+                break
+            kept.append(m)
+            used += t
+        kept.reverse()
+        return kept
+
+    async def maybe_update_summary(self, summary: str, recent_msgs: List[Dict]) -> str:
+        """
+        Update summary if recent history is large enough.
+        """
+        total = sum(approx_tokens(m["content"]) for m in recent_msgs)
+        if total < self.summary_update_trigger:
+            return summary or ""
+
+        # summarize only the last part to keep it cheap
+        tail_text = "\n".join([f'{m["role"].upper()}: {m["content"]}' for m in recent_msgs[-12:]])
+        prompt = [
+            {"role": "system", "content": "You update a running conversation summary for later retrieval. Be concise but preserve key facts, decisions, entities, constraints, and pending tasks."},
+            {"role": "user", "content": f"CURRENT SUMMARY:\n{summary}\n\nNEW DIALOGUE (latest):\n{tail_text}\n\nWrite an UPDATED SUMMARY (no more than ~{self.summary_tokens} tokens)."}
+        ]
+        new_sum = await self.llm_text(prompt, temperature=0.1)
+        return clamp_tokens(new_sum.strip(), self.summary_tokens)
+
+    def _top_hits_debug(self, hits, n=5):
+        lines=[]
+        for i,h in enumerate(hits[:n],1):
+            h=_norm_hit(h)
+            md=_safe_dict(_safe_get(h,"metadata",{}))
+            p=_safe_get(md,"original_path") or _safe_get(md,"file_path") or "unknown"
+            s=((_safe_get(h,"text","") or "")).replace("\n"," ")[:160]
+            lines.append(f"[{i}] {p} — {s} …")
+        return "\n".join(lines)
+
+    async def answer(
+        self,
+        user_text: str,
+        raw_messages: List[Dict],
+        summary: str,
+        notes: str,
+    ) -> Tuple[str, str, str, List[Dict]]:
+        """
+        Returns (answer, new_summary, new_notes)
+        """
+        # DETECT RETRIEVAL MODE FIRST
+        mode_detection = detect_retrieval_mode(user_text)
+        mode = mode_detection.get("mode", "rag")
+        
+        # EXACT PHRASE MODE - ES ONLY, NO LLM
+        if mode == "exact_phrase":
+            phrase = mode_detection["phrase"]
+            hits = self.tools.search_exact_phrase(phrase, size=10)
+            
+            if not hits:
+                answer = "0 exakte Treffer"
+                sources = []
+            else:
+                # Build bullet list of filenames
+                filenames = []
+                sources = []
+                for hit in hits:
+                    hit = _norm_hit(hit)
+                    filename = hit["metadata"].get("filename", "")
+                    path_real = hit["metadata"].get("path_real", "")
+                    
+                    if filename:
+                        filenames.append(f"• {filename}")
+                        
+                        # Generate /open URL
+                        if path_real:
+                            import urllib.parse
+                            encoded_path = urllib.parse.quote(path_real)
+                            sources.append({
+                                "n": len(sources) + 1,
+                                "path": path_real,
+                                "display_path": filename,
+                                "local_url": f"http://localhost:11436/open?path={encoded_path}"
+                            })
+                
+                answer = "\n".join(filenames)
+            
+            return answer, summary, notes, sources
+        
+        # AGENTIC LOOP: PLAN → RETRIEVE → RERANK → EVIDENCE → ANSWER/EXTRACT
+        plan = await plan_queries(self.llm, user_text)
+        mode = plan.get("mode","rag")
+        queries = plan["queries"]
+        must_include = plan.get("must_include", [])
+
+        final_hits = []
+        final_context = ""
+        final_sources = []
+
+        for attempt in range(2):  # max 2 iterations
+            hits = self.tools.search_hybrid(queries, top_k_each=8, max_total=36)
+            # normalize hits (dict vs str)
+            try:
+                if isinstance(hits, list) and hits and isinstance(hits[0], str):
+                    hits = [_norm_hit(x) for x in hits]
+            except Exception:
+                pass
+            hits = self.tools.filter_must_include(hits, must_include)
+            if hits:
+                hits = rerank(queries[0], hits, top_n=12)
+                context, sources = build_evidence_pack(hits, max_sources=6, max_chars_per_source=1600)
+            else:
+                context, sources = "", []
+
+            # if good enough: break
+            if hits and not _weak_evidence(hits):
+                final_hits, final_context, final_sources = hits, context, sources
+                break
+
+            # attempt 0 -> refine based on preview and retry
+            if attempt == 0:
+                preview = _hits_preview(hits, n=5) if hits else "NO HITS"
+                plan2 = await refine_queries(self.llm, user_text, preview)
+                mode = plan2.get("mode", mode)
+                # merge new queries + keep old first
+                newq = plan2.get("queries", [])
+                merged=[]
+                for q in (queries + newq):
+                    q=(q or "").strip()
+                    if q and q not in merged:
+                        merged.append(q)
+                queries = merged[:12]
+                must_include = plan2.get("must_include", must_include)
+                continue
+
+        # if still nothing:
+        if not final_hits:
+            # Check if user has explicit search intent
+            if _has_search_intent(user_text):
+                return ("Nicht in den Dokumenten gefunden.", summary, notes, [])
+            else:
+                # Fallback to LLM for non-search queries
+                fallback_messages = [
+                    {"role": "system", "content": "You are a helpful assistant. Answer the user's question directly and concisely."},
+                    {"role": "user", "content": user_text}
+                ]
+                fallback_answer = await self.llm_text(fallback_messages, temperature=0.2)
+                return (fallback_answer.strip(), summary, notes, [])
+
+        # OPTIONAL: Wenn attempt 2 immer noch weak evidence, dann lieber "nicht gefunden"
+        if _weak_evidence(final_hits):
+            # Check if user has explicit search intent
+            if _has_search_intent(user_text):
+                return ("Nicht in den Dokumenten gefunden.", summary, notes, [])
+            else:
+                # Fallback to LLM for non-search queries
+                fallback_messages = [
+                    {"role": "system", "content": "You are a helpful assistant. Answer the user's question directly and concisely."},
+                    {"role": "user", "content": user_text}
+                ]
+                fallback_answer = await self.llm_text(fallback_messages, temperature=0.2)
+                return (fallback_answer.strip(), summary, notes, [])
+
+        # now answer using final_context
+        context = final_context
+        hits = final_hits
+
+        # enforce: no "kein zugriff" and no hallucination
+        user_task = user_text.strip()
+        if mode == "extract":
+            user_task += "\n\nGib die Antwort als Tabelle oder strukturierte Liste. Extrahiere nur, was im Kontext steht."
+
+        messages = [
+          {"role":"system","content": SYSTEM_PROMPT},
+          {"role":"system","content": "RETRIEVED CONTEXT (zitiere als [n]):\n" + context},
+          {"role":"user","content":
+              f"Aufgabe: {user_task}\n\n"
+              f"Regeln:\n"
+              f"- Antworte nur aus RETRIEVED CONTEXT.\n"
+              f"- Nenne konkrete Pfade/Dateien nur, wenn sie in [n] stehen.\n"
+              f"- Jede zentrale Aussage braucht mind. eine Quelle [n].\n"
+              f"- Wenn es nicht im Kontext steht: sage exakt 'Nicht in den Dokumenten gefunden.'\n"
+          }
+        ]
+        out = await self.llm_text(messages, temperature=0.2)
+        notes2, answer = strip_notes(out)
+        answer = (answer or "").strip()
+
+        # anti-refusal retry
+        low = answer.lower()
+        if hits and ("kein zugriff" in low or "keinen direkten zugriff" in low or "i don't have access" in low):
+            messages.append({"role":"system","content":"Du HAST Zugriff auf RETRIEVED CONTEXT. Entferne jede Zugriff-Ausrede. Antworte nun konkret mit Quellen [n]."})
+            out2 = await self.llm_text(messages, temperature=0.1)
+            _, a2 = strip_notes(out2)
+            answer = (a2 or "").strip()
+
+        # if still no citations and not "Nicht gefunden", force one retry
+        if ("Nicht in den Dokumenten gefunden." not in answer) and ("[" not in answer):
+            messages.append({"role":"system","content":"Pflicht: setze Quellen [1], [2] ... bei den relevanten Aussagen. Wiederhole."})
+            out3 = await self.llm_text(messages, temperature=0.1)
+            _, a3 = strip_notes(out3)
+            answer = (a3 or "").strip()
+
+        # Add clickable file:// links to sources
+        if final_sources:
+            src_lines = []
+            for s in final_sources:
+                s = _norm_source(s)
+                n = s.get("n")
+                display_path = s.get("display_path", s.get("path", ""))
+                url = s.get("local_url","")
+                if url and display_path:
+                    src_lines.append(f"[{n}] [{display_path}]({url})")
+                else:
+                    src_lines.append(f"[{n}] {display_path}")
+            answer = answer.rstrip() + "\n\nQuellen (lokal):\n" + "\n\n".join(src_lines)
+
+        return (answer, summary, notes, sources)
+
+    async def build_rag_context(self, user_text: str, raw_messages: List[Dict], summary: str, notes: str):
+        """
+        Shared RAG context building for both answer() and answer_stream()
+        Returns: (mode, queries, hits, context_text, final_sources_struct, recent_history)
+        """
+        # DETECT RETRIEVAL MODE FIRST
+        mode_detection = detect_retrieval_mode(user_text)
+        mode = mode_detection.get("mode", "rag")
+        
+        # EXACT PHRASE MODE - ES ONLY, NO LLM
+        if mode == "exact_phrase":
+            phrase = mode_detection["phrase"]
+            hits = self.tools.search_exact_phrase(phrase, size=10)
+            
+            if not hits:
+                return (mode, [], [], "0 exakte Treffer", [], [])
+            else:
+                # Build bullet list of filenames and sources
+                filenames = []
+                sources = []
+                for hit in hits:
+                    hit = _norm_hit(hit)
+                    filename = hit["metadata"].get("filename", "")
+                    path_real = hit["metadata"].get("path_real", "")
+                    
+                    if filename:
+                        filenames.append(f"• {filename}")
+                        
+                        # Generate /open URL
+                        if path_real:
+                            import urllib.parse
+                            encoded_path = urllib.parse.quote(path_real)
+                            sources.append({
+                                "n": len(sources) + 1,
+                                "path": path_real,
+                                "display_path": filename,
+                                "local_url": f"http://localhost:11436/open?path={encoded_path}"
+                            })
+                
+                return (mode, [], hits, "\n".join(filenames), sources, [])
+        
+        # AGENTIC LOOP: PLAN → RETRIEVE → RERANK → EVIDENCE → ANSWER/EXTRACT
+        plan = await plan_queries(self.llm_text, user_text)
+        mode = plan.get("mode","rag")
+        queries = plan["queries"]
+        must_include = plan.get("must_include", [])
+
+        final_hits = []
+        final_context = ""
+        final_sources = []
+
+        for attempt in range(2):  # max 2 iterations
+            # RETRIEVAL
+            for q in queries:
+                hits = self.tools.search_hybrid(q, size=10)
+                # normalize hits (dict vs str)
+                try:
+                    if isinstance(hits, list) and hits and isinstance(hits[0], str):
+                        hits = [_norm_hit(x) for x in hits]
+                except Exception:
+                    pass
+                final_hits.extend(hits)
+            
+            # RERANK
+            if final_hits:
+                final_hits = rerank(final_hits, user_text, must_include, top_k=10)
+            
+            # EVIDENCE PACK
+            if final_hits:
+                evidence_pack = build_evidence_pack(final_hits, user_text)
+                final_context = evidence_pack["context"]
+                final_sources = evidence_pack["sources"]
+            else:
+                final_context = "Keine relevanten Dokumente gefunden."
+                final_sources = []
+            
+            # Check if we have enough evidence
+            if not _weak_evidence(final_hits):
+                break
+            
+            # Second attempt: refine queries
+            if attempt == 0:
+                queries = refine_queries(self.llm_text, user_text, final_hits)
+        
+        # Build recent history for context
+        recent_history = self.build_recent_history(raw_messages, self.recent_tokens)
+        
+        return (mode, queries, final_hits, final_context, final_sources, recent_history)
+
+    async def answer_stream(
+        self,
+        user_text: str,
+        raw_messages: List[Dict],
+        summary: str,
+        notes: str,
+    ):
+        """
+        Streaming version of answer - yields chunks as they come from LLM
+        Implements TRACE THEN FINAL format for OpenWebUI
+        """
+        import time
+        # Store for later use in main.py
+        self.new_summary = summary
+        self.new_notes = notes
+        self.last_sources = []
+        
+        # ENV toggles
+        agent_trace = int(os.getenv("AGENT_TRACE", "1"))
+        agent_rationale = int(os.getenv("AGENT_RATIONALE", "0"))
+        
+        # Heartbeat tracking
+        last_chunk_time = time.time()
+        heartbeat_interval = 2.0  # seconds
+        
+        def should_send_heartbeat():
+            return time.time() - last_chunk_time > heartbeat_interval
+        
+        def update_chunk_time():
+            nonlocal last_chunk_time
+            last_chunk_time = time.time()
+        
+        # 1) Start TRACE immediately
+        if agent_trace:
+            yield "[TRACE]\n"
+            update_chunk_time()
+        
+        # 2) Build RAG context using shared method
+        mode, queries, hits, context_text, final_sources, recent_history = await self.build_rag_context(
+            user_text, raw_messages, summary, notes
+        )
+        
+        # 3) Emit detailed trace with heartbeat
+        if agent_trace:
+            yield f"• Mode: {mode}\n"
+            update_chunk_time()
+            
+            if mode == "exact_phrase":
+                yield f"• Exact phrase search completed\n"
+                update_chunk_time()
+                yield f"• Results: {len(hits)} files found\n"
+                update_chunk_time()
+            else:
+                yield f"• Plan: {len(queries)} queries generated\n"
+                update_chunk_time()
+                
+                for i, q in enumerate(queries[:3], 1):  # Show first 3 queries
+                    if should_send_heartbeat():
+                        yield "• …\n"
+                        update_chunk_time()
+                    yield f"• Query {i}: {q[:80]}...\n"
+                    update_chunk_time()
+                
+                if should_send_heartbeat():
+                    yield "• …\n"
+                    update_chunk_time()
+                    
+                yield f"• Retrieval: {len(hits)} total hits\n"
+                update_chunk_time()
+                yield f"• Rerank: top {len(final_sources)} sources selected\n"
+                update_chunk_time()
+                yield f"• Evidence: context built with {len(context_text)} chars\n"
+                update_chunk_time()
+                yield f"• Finalizing response...\n"
+                update_chunk_time()
+        
+        # 4) End TRACE and start FINAL
+        if agent_trace:
+            yield "[/TRACE]\n\n[FINAL]\n"
+            update_chunk_time()
+        
+        # 5) Handle exact_phrase mode (immediate response)
+        if mode == "exact_phrase":
+            yield context_text  # This is the filenames list
+            update_chunk_time()
+            if final_sources:
+                yield "\n\nQuellen (lokal):\n"
+                update_chunk_time()
+                for src in final_sources:
+                    src = _norm_source(src)
+                    yield f"[{src['n']}] [{src['display_path']}]({src['local_url']})\n"
+                    update_chunk_time()
+            self.last_sources = final_sources
+            return
+        
+        # 6) Stream LLM response in real-time with heartbeat
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": f"SUMMARY (persistent memory):\n{summary}"},
+            {"role": "system", "content": f"NOTES (private working memory):\n{notes}"},
+            {"role": "system", "content": f"RECENT CHAT HISTORY:\n{recent_history}"},
+            {"role": "system", "content": f"RETRIEVED CONTEXT:\n{context_text}"},
+            {"role": "user", "content": user_text}
+        ]
+        
+        # Stream LLM tokens with heartbeat
+        last_llm_chunk = ""
+        async for chunk in self.llm_stream(messages, temperature=0.2):
+            if chunk.strip():  # Only yield non-empty chunks
+                yield chunk
+                update_chunk_time()
+                last_llm_chunk = chunk
+            elif should_send_heartbeat() and len(last_llm_chunk) > 0:
+                # Send heartbeat during LLM pauses
+                yield "…"
+                update_chunk_time()
+        
+        # 7) Add sources at the end
+        if final_sources:
+            yield "\n\nQuellen (lokal):\n"
+            update_chunk_time()
+            for src in final_sources:
+                src = _norm_source(src)
+                n = src.get("n", len(final_sources))
+                display_path = src.get("display_path", src.get("path", ""))
+                url = src.get("local_url", "")
+                if url and display_path:
+                    yield f"[{n}] [{display_path}]({url})\n"
+                else:
+                    yield f"[{n}] {display_path}\n"
+                update_chunk_time()
+        
+        # Store sources for main.py
+        self.last_sources = final_sources

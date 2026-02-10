@@ -8,12 +8,33 @@ from fastapi import FastAPI, Header, Request, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
-from .agent import Agent
+from .agent_orchestrator import Agent, AgentOrchestrator
+from .rag_pipeline import SimpleRAGPipeline  # MVP: Simple RAG
 from .state import StateStore
 from .es_proxy import router as es_router
+from .phase_strategy import StrategyAgent
+from .phase_retrieval import RetrievalAgent
+from .phase_analysis import AnalysisAgent
+from .phase_validation import ValidationAgent
+from .phase_answer import AnswerAgent
+from .thinking_agent import ThinkingAgent  # Phase 2: True reasoning agent
+from .chroma_client import ChromaClient
+from .tools import Tools
 
-app = FastAPI(title="AGENTIC RAG API (OpenAI-compatible subset)")
+app = FastAPI(title="AGENTIC RAG API - Thinking Mode Agent")
+
+# Initialize tools and thinking agent
+ollama_base = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+llm_model = os.getenv("LLM_MODEL_ANSWER", "llama4:latest")
+tools = Tools()
+thinking_agent = ThinkingAgent(ollama_base, llm_model, tools)
+
+# Legacy agent for non-streaming fallback
 agent = Agent()
+orchestrator = AgentOrchestrator()
+
+# MVP: Simple RAG pipeline (Query → Search → Snippets → LLM)
+simple_rag = SimpleRAGPipeline()
 
 ENABLE_DEBUG_ENDPOINTS = os.getenv("ENABLE_DEBUG_ENDPOINTS", "0") == "1"
 
@@ -52,7 +73,6 @@ def _normalize_delta_content(v) -> str:
     return str(v)
 
 def _sse_chunk(rid: str, created: int, model: str, delta: dict, finish_reason=None) -> str:
-    # Ensure OpenAI-compatible delta fields
     safe_delta = {}
     if "role" in delta and isinstance(delta["role"], str):
         safe_delta["role"] = delta["role"]
@@ -71,6 +91,35 @@ def _sse_chunk(rid: str, created: int, model: str, delta: dict, finish_reason=No
         }]
     }
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+def _format_phase_for_ui(event: dict) -> str:
+    """Format phase events for OpenWebUI display"""
+    event_type = event.get("type")
+    phase = event.get("phase", "")
+    
+    if event_type == "phase_start":
+        phase_names = {
+            "strategy": "🎯 Strategie",
+            "retrieval": "🔍 Suche", 
+            "analysis": "📄 Dokumenten-Analyse",
+            "validation": "✓ Validierung",
+            "answer": "💡 Antwort"
+        }
+        name = phase_names.get(phase, phase)
+        return f"\n[{name}] wird gestartet...\n"
+    
+    elif event_type == "phase_progress":
+        message = event.get("message", "")
+        return f"  → {message}\n"
+    
+    elif event_type == "phase_complete":
+        return f"  ✓ Abgeschlossen\n"
+    
+    elif event_type == "error":
+        msg = event.get("message", "Unknown error")
+        return f"  ⚠ Fehler: {msg}\n"
+    
+    return ""
 
 def derive_conv_id(messages, x_conversation_id: str | None) -> str:
     if x_conversation_id and x_conversation_id.strip():
@@ -98,13 +147,26 @@ class ChatReq(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "agent_api", "time": int(time.time())}
+    return {
+        "ok": True,
+        "service": "agent_api",
+        "version": "2.0-multi-phase",
+        "time": int(time.time()),
+        "models": {
+            "strategy": orchestrator.model_strategy,
+            "answer": orchestrator.model_answer
+        }
+    }
 
 @app.get("/v1/models")
 def models():
     return {
         "object": "list",
-        "data": [{"id": "agentic-rag", "object": "model", "created": 0, "owned_by": "local"}]
+        "data": [
+            {"id": "agentic-rag", "object": "model", "created": 0, "owned_by": "local"},
+            {"id": "agentic-rag-strategy", "object": "model", "created": 0, "owned_by": "local"},
+            {"id": "agentic-rag-deep", "object": "model", "created": 0, "owned_by": "local"}
+        ]
     }
 
 @app.get("/open")
@@ -135,94 +197,119 @@ async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = Non
         if m.role == "user":
             user_text = m.content
             break
+    
+    # Pipeline selection: Default = SimpleRAG (MVP), [ADVANCED] = Agentic
+    use_simple_rag = True
+    if user_text.startswith("[ADVANCED]"):
+        use_simple_rag = False
+        user_text = user_text.replace("[ADVANCED]", "").strip()
+    
+    if use_simple_rag:
+        # MVP: Simple RAG Pipeline
+        answer_parts = []
+        sources = []
+        
+        async for event in simple_rag.run(user_text, summary, notes):
+            if event.type == "token":
+                answer_parts.append(event.data.get("content", ""))
+            elif event.type == "complete":
+                sources = event.data.get("sources", [])
+        
+        answer = "".join(answer_parts) if answer_parts else "Keine Antwort generiert."
+        
+        # Build sources for response
+        formatted_sources = []
+        for s in sources:
+            formatted_sources.append({
+                "n": s.get("n", "?"),
+                "path": s.get("path", ""),
+                "display_path": s.get("display_path", s.get("path", ""))
+            })
+        
+        response = {
+            "id": f"agentic_{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": req.model or "agentic-rag",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": answer},
+                "finish_reason": "stop"
+            }]
+        }
+        if formatted_sources:
+            response["sources"] = formatted_sources
+        
+        # Save state (simple rag doesn't update summary/notes yet)
+        store.save(conv_id, summary, notes)
+        
+        return response
+    else:
+        # Advanced: Agentic pipeline with full analysis
+        answer, new_summary, new_notes, sources = await agent.answer(
+            user_text=user_text,
+            raw_messages=[m.model_dump() for m in req.messages],
+            summary=summary,
+            notes=notes,
+        )
 
-    answer, new_summary, new_notes, sources = await agent.answer(
-        user_text=user_text,
-        raw_messages=[m.model_dump() for m in req.messages],
-        summary=summary,
-        notes=notes,
-    )
+        store.save(conv_id, new_summary, new_notes)
 
-    store.save(conv_id, new_summary, new_notes)
-
-    response = {
-        "id": f"agentic_{int(time.time())}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": req.model or "agentic-rag",
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": answer},
-            "finish_reason": "stop"
-        }]
-    }
-    if sources:
-        response["sources"] = sources
-    return response
+        response = {
+            "id": f"agentic_{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": req.model or "agentic-rag",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": answer},
+                "finish_reason": "stop"
+            }]
+        }
+        if sources:
+            response["sources"] = sources
+        return response
 
 @app.post("/v1/chat/completions")
 async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = Header(default=None)):
+    rid = f"agentic_{int(time.time())}"
+    created = int(time.time())
+    model = req.model or "agentic-rag"
+    
     if getattr(req, "stream", False):
         async def gen():
-            rid = f"agentic_{int(time.time())}"
-            created = int(time.time())
-            model = req.model or "agentic-rag"
-
-            # Important: send first chunk immediately so OpenWebUI stops showing skeleton.
+            # Send first chunk immediately
             yield _sse_chunk(rid, created, model, {"role": "assistant"})
             
-            # Important: send TRACE immediately so OpenWebUI shows activity.
-            yield _sse_chunk(rid, created, model, {"content": "[TRACE]\n"})
-
             try:
-                # If agent has a native streaming generator, prefer it.
-                if hasattr(agent, "answer_stream"):
-                    async for part in agent.answer_stream(
-                        user_text=next((m.content for m in req.messages[::-1] if m.role == "user"), ""),
-                        raw_messages=[m.model_dump() for m in req.messages],
-                        summary=(store.load(derive_conv_id(req.messages, x_conversation_id)).get("summary","") or ""),
-                        notes=(store.load(derive_conv_id(req.messages, x_conversation_id)).get("notes","") or ""),
-                    ):
-                        # part may be a string, dict, etc. Normalize to string.
-                        normalized_content = _normalize_delta_content(part)
-                        yield _sse_chunk(rid, created, model, {"content": normalized_content})
-                    yield "data: [DONE]\n\n"
-                    return
-
-                # Fallback: compute full and send as single content chunk.
-                # Send heartbeat while computing
-                yield _sse_chunk(rid, created, model, {"content": "[TRACE] Retrieving documents..."})
+                user_text = next((m.content for m in req.messages[::-1] if m.role == "user"), "")
                 
-                # Background computation with periodic heartbeats
-                async def compute_with_heartbeat():
-                    return await chat_non_stream_impl(req, x_conversation_id)
+                # MVP: SimpleRAG for streaming too (consistent with non-streaming)
+                answer_parts = []
+                sources = []
                 
-                # Run computation with heartbeats every 2 seconds
-                task = asyncio.create_task(compute_with_heartbeat())
+                async for event in simple_rag.run(user_text, "", ""):
+                    if event.type == "token":
+                        content = event.data.get("content", "")
+                        answer_parts.append(content)
+                        yield _sse_chunk(rid, created, model, {"content": content})
+                    elif event.type == "complete":
+                        sources = event.data.get("sources", [])
                 
-                while not task.done():
-                    yield _sse_chunk(rid, created, model, {"content": " "})  # Heartbeat space
-                    await asyncio.sleep(2)
+                # Add sources at end
+                if sources:
+                    source_text = "\n\n📚 Quellen:\n" + "\n".join(
+                        f"[{s.get('n', '?')}] {s.get('display_path', s.get('path', ''))}"
+                        for s in sources
+                    )
+                    yield _sse_chunk(rid, created, model, {"content": source_text})
                 
-                full = await task
-
-                if "error" in full:
-                    yield _sse_chunk(rid, created, model, {"content": f"Error: {full['error']}"}, finish_reason="stop")
-                    yield "data: [DONE]\n\n"
-                    return
-
-                content = ""
-                try:
-                    content = full["choices"][0]["message"]["content"]
-                except Exception:
-                    content = ""
-
-                yield _sse_chunk(rid, created, model, {"content": content}, finish_reason="stop")
+                # End marker
+                yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")
                 yield "data: [DONE]\n\n"
 
             except Exception as e:
-                # Always end stream properly.
-                yield _sse_chunk(rid, created, model, {"content": f"Error: {type(e).__name__}: {e}"}, finish_reason="stop")
+                yield _sse_chunk(rid, created, model, {"content": f"\n⚠ Fehler: {type(e).__name__}: {e}"}, finish_reason="stop")
                 yield "data: [DONE]\n\n"
 
         headers = {

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/media/felix/RAG/AGENTIC"
+cd "$ROOT"
+
+echo "=== START: AGENTIC stack boot & sanity ==="
+
+# 0) Docker daemon erreichbar?
+if ! docker info >/dev/null 2>&1; then
+  echo "ERROR: docker daemon not reachable. Start Docker first."
+  exit 2
+fi
+
+# 1) Compose config validieren
+docker compose config >/dev/null
+echo "OK: docker compose config valid"
+
+# 2) Starten (idempotent)
+echo "Bringing stack up..."
+docker compose up -d
+
+echo "Waiting a few seconds for services..."
+sleep 4
+
+# Helper: curl with short timeouts
+curl_tiny() {
+  curl -sS --connect-timeout 2 --max-time 10 "$@"
+}
+
+# 3) Quick health checks
+echo
+echo "=== Sanity: Elasticsearch ==="
+ES_HEALTH="$(curl_tiny http://localhost:9200/_cluster/health?pretty | head -c 600 || true)"
+echo "$ES_HEALTH"
+ES_COUNT="$(curl_tiny http://localhost:9200/rag_files_v1/_count?pretty | head -c 200 || true)"
+echo "$ES_COUNT"
+
+if ! echo "$ES_COUNT" | grep -q '"count"'; then
+  echo "ERROR: ES count endpoint failed."
+  exit 3
+fi
+
+echo
+echo "=== Sanity: Agent API /health ==="
+AG_HEALTH="$(curl_tiny http://localhost:11436/health || true)"
+echo "${AG_HEALTH:-(empty/ok)}"
+
+echo
+echo "=== Sanity: Agent non-stream exact phrase ==="
+AG_NS="$(curl_tiny http://localhost:11436/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"llama4:latest",
+    "stream": false,
+    "messages":[{"role":"user","content":"Suche exakt die Phrase: Projektleitung Konzepthase. Gib nur die Dateinamen der besten Treffer."}]
+  }' | head -c 1200 || true)"
+echo "$AG_NS"
+
+if ! echo "$AG_NS" | grep -q "Sockelkosten Konzeptphase.xlsx"; then
+  echo "WARN: Agent non-stream did not show expected filename. (This may still be OK if model/tooling differs.)"
+fi
+
+echo
+echo "=== Sanity: Agent stream SSE (must contain data: and [DONE]) ==="
+# We only read a small chunk to validate protocol
+AG_SSE="$(curl -sS -N --connect-timeout 2 --max-time 10 http://localhost:11436/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"llama4:latest",
+    "stream": true,
+    "messages":[{"role":"user","content":"Suche exakt die Phrase: Projektleitung Konzepthase. Gib nur die Dateinamen der besten Treffer."}]
+  }' | head -n 40 || true)"
+echo "$AG_SSE"
+
+if ! echo "$AG_SSE" | grep -q "^data:"; then
+  echo "ERROR: SSE streaming seems broken (no 'data:' lines)."
+  exit 4
+fi
+if ! echo "$AG_SSE" | grep -q "data: \[DONE\]"; then
+  echo "ERROR: SSE streaming seems broken (no [DONE])."
+  exit 5
+fi
+
+echo
+echo "=== Sanity: Chroma count (inside agent_api container) ==="
+CID="$(docker compose ps -q agent_api 2>/dev/null || true)"
+if [[ -z "${CID}" ]]; then
+  echo "ERROR: Could not find agent_api container id via compose."
+  docker compose ps
+  exit 6
+fi
+
+CHROMA_COUNT="$(docker exec -i "$CID" python - <<'PY'
+import chromadb
+c = chromadb.PersistentClient(path="/chroma").get_collection("rag_files_v1_chunks")
+print(c.count())
+PY
+)"
+echo "rag_files_v1_chunks.count = ${CHROMA_COUNT}"
+
+if [[ "$CHROMA_COUNT" -lt 100000 ]]; then
+  echo "ERROR: Chroma count unexpectedly low (<100k). Something is wrong with Chroma data/mount."
+  exit 7
+fi
+
+echo
+echo "=== START OK ==="
+docker compose ps
+echo "You can use the system now."

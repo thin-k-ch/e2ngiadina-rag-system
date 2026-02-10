@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+echo "=== START: AGENTIC stack boot & sanity ==="
+
+# -------- helpers --------
+curl_tiny() {
+  curl -sS --connect-timeout 2 --max-time 10 "$@"
+}
+
+wait_http_200() {
+  local name="$1"
+  local url="$2"
+  local timeout_s="${3:-120}"
+  local start_ts now_ts code
+  start_ts="$(date +%s)"
+
+  while true; do
+    code="$(curl -sS --connect-timeout 2 --max-time 5 -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || true)"
+    if [[ "$code" == "200" ]]; then
+      echo "OK: $name is HTTP 200 ($url)"
+      return 0
+    fi
+
+    now_ts="$(date +%s)"
+    if (( now_ts - start_ts >= timeout_s )); then
+      echo "ERROR: timeout waiting for $name to be HTTP 200 ($url). Last code='$code'"
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+wait_es_health() {
+  local timeout_s="${1:-180}"
+  local start_ts now_ts body
+  start_ts="$(date +%s)"
+
+  while true; do
+    body="$(curl -sS --connect-timeout 2 --max-time 5 http://localhost:9200/_cluster/health 2>/dev/null || true)"
+    # single-node can be yellow; that's OK
+    if echo "$body" | grep -q '"status":"yellow"\|"status":"green"'; then
+      echo "OK: Elasticsearch cluster status is yellow/green"
+      return 0
+    fi
+
+    now_ts="$(date +%s)"
+    if (( now_ts - start_ts >= timeout_s )); then
+      echo "ERROR: timeout waiting for Elasticsearch cluster health"
+      echo "$body"
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+dump_logs_on_fail() {
+  echo
+  echo "=== DIAG: docker compose ps ==="
+  docker compose ps || true
+  echo
+  echo "=== DIAG: elasticsearch logs (tail) ==="
+  docker compose logs --tail 120 elasticsearch || true
+  echo
+  echo "=== DIAG: agent_api logs (tail) ==="
+  docker compose logs --tail 120 agent_api || true
+}
+
+# -------- start --------
+if ! docker compose config >/dev/null; then
+  echo "ERROR: docker compose config invalid"
+  exit 2
+fi
+echo "OK: docker compose config valid"
+
+echo "Bringing stack up..."
+docker compose up -d
+
+echo "Waiting for services to become ready (with timeouts)..."
+
+# ES readiness (port can reset during warmup/restarts)
+if ! wait_http_200 "Elasticsearch" "http://localhost:9200" 180; then
+  dump_logs_on_fail
+  exit 3
+fi
+if ! wait_es_health 180; then
+  dump_logs_on_fail
+  exit 3
+fi
+
+echo
+echo "=== Sanity: Elasticsearch count (rag_files_v1) ==="
+ES_COUNT="$(curl_tiny http://localhost:9200/rag_files_v1/_count?pretty | head -c 400 || true)"
+echo "$ES_COUNT"
+if ! echo "$ES_COUNT" | grep -q '"count"'; then
+  echo "ERROR: ES count endpoint failed."
+  dump_logs_on_fail
+  exit 4
+fi
+
+# Agent API readiness
+if ! wait_http_200 "Agent API" "http://localhost:11436/health" 180; then
+  dump_logs_on_fail
+  exit 5
+fi
+
+# Optional quick functional ping (non-stream)
+echo
+echo "=== Sanity: Agent API non-stream (exact phrase) ==="
+AGENT_JSON="$(curl_tiny -H 'Content-Type: application/json' \
+  http://localhost:11436/v1/chat/completions \
+  -d '{"model":"llama4:latest","messages":[{"role":"user","content":"Suche exakt die Phrase: Projektleitung Konzepthase. Gib nur die Dateinamen der besten Treffer."}],"stream":false}' \
+  | head -c 900 || true)"
+echo "$AGENT_JSON"
+if ! echo "$AGENT_JSON" | grep -qi "Sockelkosten Konzeptphase.xlsx"; then
+  echo "WARN: Agent response did not include expected ground-truth filename. (System may still be OK, but check retrieval.)"
+fi
+
+# Chroma sanity: cheap existence checks (no API dependency)
+echo
+echo "=== Sanity: Chroma volume presence ==="
+if docker compose exec -T agent_api sh -lc 'test -f /chroma/chroma.sqlite3'; then
+  docker compose exec -T agent_api sh -lc 'ls -lh /chroma/chroma.sqlite3 | sed -e "s/^/CHROMA: /"'
+else
+  echo "ERROR: /chroma/chroma.sqlite3 not found inside agent_api container"
+  dump_logs_on_fail
+  exit 6
+fi
+
+echo
+echo "=== START OK ==="
+echo "Stack is up and passed basic sanity checks."

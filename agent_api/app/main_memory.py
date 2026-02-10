@@ -58,6 +58,10 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
         if m.role == "user":
             user_text = m.content
             break
+    
+    # DEBUG: Log the actual query received
+    print(f"🔍 OPENWEBUI_QUERY: '{user_text[:100]}'")
+    print(f"🔍 OPENWEBUI_MESSAGES_COUNT: {len(req.messages)}")
 
     answer, new_summary, new_notes = await agent.answer(
         user_text=user_text,

@@ -138,7 +138,18 @@ class ESTools:
             "query": {
                 "bool": {
                     "must": [
-                        {"match": {ES_CONTENT_FIELD: {"query": query, "operator": "AND"}}}
+                        {
+                            "multi_match": {
+                                "query": query,
+                                "fields": [
+                                    "content^3",
+                                    "file.filename^5",
+                                    "path.virtual^2"
+                                ],
+                                "type": "best_fields",
+                                "operator": "OR"
+                            }
+                        }
                     ],
                     "filter": [
                         {"terms": {"file.extension": exts}}
@@ -160,3 +171,99 @@ class ESTools:
         except Exception as e:
             print(f"ES BM25 search failed: {e}")
             return {}
+    
+    def es_get_document_content(
+        self,
+        doc_id: Optional[str] = None,
+        file_path: Optional[str] = None,
+        index: str = "rag_files_v1"
+    ) -> Dict[str, Any]:
+        """
+        Retrieve full document content from ES by doc_id or file_path.
+        Returns: {"content": "...", "path": "...", "meta": {...}}
+        """
+        es = self._get_es()
+        if es is None:
+            return {"error": "ES not available"}
+        
+        try:
+            if doc_id:
+                result = es.get(index=index, id=doc_id)
+                source = result.get("_source", {})
+                return {
+                    "doc_id": doc_id,
+                    "content": source.get("content", ""),
+                    "path": source.get("meta", {}).get("real", {}).get("path", "") or 
+                           source.get("path", {}).get("real", ""),
+                    "meta": source.get("meta", {}),
+                    "file": source.get("file", {})
+                }
+            elif file_path:
+                body = {
+                    "size": 1,
+                    "query": {
+                        "term": {"meta.real.path.keyword": file_path}
+                    }
+                }
+                result = es.search(index=index, body=body)
+                hits = result.get("hits", {}).get("hits", [])
+                if hits:
+                    source = hits[0].get("_source", {})
+                    return {
+                        "doc_id": hits[0].get("_id"),
+                        "content": source.get("content", ""),
+                        "path": file_path,
+                        "meta": source.get("meta", {}),
+                        "file": source.get("file", {})
+                    }
+                return {"error": f"Document not found: {file_path}"}
+            else:
+                return {"error": "Either doc_id or file_path required"}
+                
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def es_search_by_path_prefix(
+        self,
+        path_prefix: str,
+        query: str = "*",
+        size: int = 10,
+        index: str = "rag_files_v1"
+    ) -> List[Dict[str, Any]]:
+        """
+        Find all documents under a specific path prefix.
+        Useful for finding all Manteldokumente for a customer.
+        """
+        es = self._get_es()
+        if es is None:
+            return []
+        
+        body = {
+            "size": size,
+            "query": {
+                "bool": {
+                    "must": [
+                        {"wildcard": {"meta.real.path": f"{path_prefix}*"}},
+                        {"match": {"content": query}} if query != "*" else {"match_all": {}}
+                    ]
+                }
+            },
+            "_source": ["content", "meta", "file"]
+        }
+        
+        try:
+            result = es.search(index=index, body=body)
+            hits = result.get("hits", {}).get("hits", [])
+            return [
+                {
+                    "doc_id": h.get("_id"),
+                    "content": h.get("_source", {}).get("content", ""),
+                    "path": h.get("_source", {}).get("meta", {}).get("real", {}).get("path", ""),
+                    "score": h.get("_score"),
+                    "file": h.get("_source", {}).get("file", {})
+                }
+                for h in hits
+            ]
+        except Exception as e:
+            print(f"ES path prefix search failed: {e}")
+            return []
