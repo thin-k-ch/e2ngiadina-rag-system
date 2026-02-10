@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 from bs4 import BeautifulSoup
 from docx import Document
@@ -95,3 +96,132 @@ def read_msg(path: str) -> str:
 
     body = getattr(m, "body", "") or ""
     return "\n".join(fields + ["", body]).strip()
+
+
+def read_eml_with_attachments(path: str) -> dict:
+    """
+    Extract text from .eml file including attachments with OCR.
+    Returns: {"text": "combined text", "attachments": [{"filename": ..., "text": ...}]}
+    """
+    import email
+    import email.policy
+    from email import message_from_binary_file
+    from io import BytesIO
+    
+    # Try to import OCR libraries
+    try:
+        import pytesseract
+        from PIL import Image
+        OCR_AVAILABLE = True
+    except ImportError:
+        OCR_AVAILABLE = False
+    
+    # Try to import PDF reader
+    try:
+        import fitz  # PyMuPDF
+        PDF_AVAILABLE = True
+    except ImportError:
+        PDF_AVAILABLE = False
+
+    def extract_text_from_attachment(part):
+        """Extract text from attachment with OCR if needed"""
+        filename = part.get_filename() or "unknown"
+        content_type = part.get_content_type()
+        payload = part.get_payload(decode=True) or b""
+        
+        if not payload:
+            return {"filename": filename, "text": "", "content_type": content_type}
+        
+        text = ""
+        ext = os.path.splitext(filename)[1].lower()
+        
+        # Text files
+        if content_type.startswith("text/") or ext in [".txt", ".csv", ".json", ".xml", ".html"]:
+            text = read_text_bytes(payload)
+        
+        # PDF files
+        elif ext == ".pdf" and PDF_AVAILABLE:
+            try:
+                doc = fitz.open(stream=payload, filetype="pdf")
+                for page in doc:
+                    text += page.get_text()
+            except Exception as e:
+                text = f"[PDF extraction error: {e}]"
+        
+        # Images with OCR
+        elif ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"] and OCR_AVAILABLE:
+            try:
+                img = Image.open(BytesIO(payload))
+                text = pytesseract.image_to_string(img)
+            except Exception as e:
+                text = f"[OCR error: {e}]"
+        
+        # DOCX files
+        elif ext == ".docx":
+            try:
+                from docx import Document
+                doc = Document(BytesIO(payload))
+                text = "\n".join([p.text for p in doc.paragraphs])
+            except Exception as e:
+                text = f"[DOCX extraction error: {e}]"
+        
+        return {"filename": filename, "text": text, "content_type": content_type}
+
+    # Parse EML file
+    with open(path, "rb") as f:
+        msg = message_from_binary_file(f, policy=email.policy.default)
+    
+    # Extract headers
+    headers = []
+    for header in ["Subject", "From", "To", "Date", "Cc", "Bcc"]:
+        value = msg.get(header)
+        if value:
+            headers.append(f"{header}: {value}")
+    
+    # Extract body and attachments
+    body_text = ""
+    attachments = []
+    
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            
+            # Skip container parts
+            if content_type.startswith("multipart/"):
+                continue
+            
+            # Extract body from text parts
+            if content_type.startswith("text/") and not part.get_filename():
+                try:
+                    body_text += part.get_content()
+                except:
+                    pass
+            
+            # Extract attachments
+            elif part.get_filename():
+                att = extract_text_from_attachment(part)
+                attachments.append(att)
+    else:
+        # Single part message
+        try:
+            body_text = msg.get_content()
+        except:
+            pass
+    
+    # Combine all text
+    attachment_text = "\n\n".join([
+        f"--- Attachment: {a['filename']} ---\n{a['text']}"
+        for a in attachments if a.get("text")
+    ])
+    
+    full_text = "\n\n".join([
+        "\n".join(headers),
+        "",
+        body_text,
+        attachment_text
+    ]).strip()
+    
+    return {
+        "text": full_text,
+        "attachments": attachments
+    }
