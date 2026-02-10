@@ -15,7 +15,7 @@ ES_SOURCE_FIELDS = [
     "meta.real.virtual",
 ]
 
-DEFAULT_EXT_FILTER = ["md", "txt", "rst", "log", "json", "yaml", "yml"]
+DEFAULT_EXT_FILTER = ["md", "txt", "rst", "log", "json", "yaml", "yml", "pdf", "docx", "doc", "msg", "eml", "xlsx", "xls", "pptx", "ppt"]
 
 # Policy Configuration
 EXACT_TRIGGERS = [

@@ -339,12 +339,36 @@ class Agent:
             legacy_hits = []
         
         sources = _build_sources(legacy_hits)
+        
+        print(f"🔍 DEBUG: legacy_hits count={len(legacy_hits)}")
+        if legacy_hits:
+            print(f"🔍 DEBUG: first hit keys={list(legacy_hits[0].keys())}")
+            print(f"🔍 DEBUG: first hit snippet={legacy_hits[0].get('snippet', 'NO SNIPPET')[:100]}")
 
-        context = _format_context(hits)
+        context = _format_context(legacy_hits)
+        print(f"🔍 DEBUG: context length={len(context)}")
+        print(f"🔍 DEBUG: context preview={context[:200]}")
         sys = (
-            "Du bist ein lokaler RAG-Agent. Antworte kurz, präzise und auf Deutsch.\n"
-            "Wenn Kontext vorhanden ist, stütze dich darauf und nenne Quellen am Ende.\n"
-            "Wenn Kontext fehlt, sage das klar, und schlage 1-2 präzisierende Rückfragen vor.\n"
+            "DU BIST EIN RAG-AGENT. KORREKTE ANTWORT-STRUKTUR:\n"
+            "1. Starte DIREKT mit: 'Laut Dokument [N]:' gefolgt vom Zitat\n"
+            "2. MAXIMAL 2-3 konkrete Zitate aus dem Kontext\n"
+            "3. Quellen-Liste am Ende: [1] [Pfad](URL)\n"
+            "\n"
+            "VERBOT - Diese Phrasen sind STRENG UNTERAGT:\n"
+            "- 'Ich habe...'\n"
+            "- 'Hier sind...'\n"
+            "- 'Es scheint...'\n"
+            "- 'Wenn Sie...'\n"
+            "\n"
+            "BEISPIEL für korrekte Antwort:\n"
+            "Laut Dokument [1]: 'Projektleitung Konzepthase umfasst Planung und Steuerung.'\n"
+            "Laut Dokument [3]: 'Verantwortlichkeiten in Phase 1: Konzeptentwicklung.'\n"
+            "\n"
+            "Quellen:\n"
+            "[1] [/Pfad/zum/Dokument.pdf](http://localhost:11436/open?path=...)\n"
+            "[3] [/Pfad/zum/Dokument.pdf](http://localhost:11436/open?path=...)\n"
+            "\n"
+            "WENN keine Treffer: 'Keine Dokumente mit [Suchbegriff] gefunden.'\n"
         )
 
         msgs: List[Dict[str, str]] = [{"role": "system", "content": sys}]

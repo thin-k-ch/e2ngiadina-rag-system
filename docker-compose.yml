@@ -167,9 +167,10 @@ services:
       - PORT=8086
       # User Management
       - DEFAULT_USER_ROLE=admin
-      - ENABLE_SIGNUP=true
+      - ENABLE_SIGNUP=false
       - ENABLE_LOGIN=true
-      - WEBUI_AUTH=False
+      - WEBUI_AUTH=True
+      - ENABLE_PERSISTENT_CONFIG=False
       # Streaming & Timeout Optimierungen
       - AIOHTTP_CLIENT_TIMEOUT=300
       - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=7

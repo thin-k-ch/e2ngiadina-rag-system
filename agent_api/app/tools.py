@@ -49,8 +49,16 @@ class Tools:
     def decide_gate(self, user_query: str) -> Gate:
         q = " ".join(user_query.strip().split())
         exact = any(re.search(p, q, re.I) for p in EXACT_TRIGGERS)
-        search = any(re.search(p, q, re.I) for p in SEARCH_TRIGGERS)
-        internal = any(re.search(p, q, re.I) for p in INTERNAL_TRIGGERS)
+        no_rag = any(re.search(p, q, re.I) for p in [
+            r"\bbrainstorm\b",
+            r"\bidee\b",
+            r"\bkreativ\b",
+            r"\bschreib\b", 
+            r"\btext\b.*\bschreib\b",
+            r"\bpython\b.*\bskill\b",
+            r"\breines schreiben\b",
+            r"\bohne quellen\b",
+        ])
 
         phrase = self._quoted(q)
         
@@ -58,20 +66,16 @@ class Tools:
         if exact and not phrase:
             phrase = q
 
-        # HARD RULE 1: exact request => exact_phrase mode, always RAG
+        # HARD RULE 1: explicit no_rag request (brainstorm, pure writing)
+        if no_rag:
+            return Gate(False, "no_rag", None, "Pure writing/brainstorming - no evidence needed")
+
+        # HARD RULE 2: exact request => exact_phrase mode
         if exact:
             return Gate(True, "exact_phrase", phrase or q, "Exact phrase requested")
 
-        # HARD RULE 2: search/lookup request => hybrid RAG
-        if search:
-            return Gate(True, "hybrid", None, "Search/lookup query requires evidence")
-
-        # HARD RULE 3: internal/technical => hybrid RAG (ES+Chroma)
-        if internal:
-            return Gate(True, "hybrid", None, "Internal/technical query requires evidence")
-
-        # Default: allow no_rag only for pure writing/brainstorming
-        return Gate(False, "no_rag", None, "No evidence required")
+        # DEFAULT: ALWAYS RAG (hybrid mode)
+        return Gate(True, "hybrid", None, "Always search for evidence")
 
     def _get(self, d: dict, path: str, default=None):
         cur = d
@@ -84,7 +88,11 @@ class Tools:
     def _es_to_hits(self, es_resp: Dict[str, Any], *, phrase: Optional[str] = None, exact_level: str = "bm25") -> Tuple[List[Dict[str, Any]], int]:
         hits = []
         total = self._get(es_resp, "hits.total.value", 0) or 0
-        for h in self._get(es_resp, "hits.hits", []) or []:
+        hits_list = self._get(es_resp, "hits.hits", []) or []
+        print(f"🔍 ES_TO_HITS DEBUG: total={total}, hits_list len={len(hits_list)}")
+        if hits_list:
+            print(f"🔍 ES_TO_HITS DEBUG: first hit keys={list(hits_list[0].keys())}")
+        for h in hits_list:
             src = h.get("_source", {}) or {}
             highlight = (h.get("highlight", {}) or {}).get(ES_CONTENT_FIELD, [])
             snippet = " ".join(highlight) if highlight else ""
@@ -125,14 +133,15 @@ class Tools:
         If 0 hits, runs AND fallback once.
         Returns unified dict with rounds and best hits.
         """
-        print(f"🔍 EXACT PHRASE SEARCH: '{phrase}'")
+        print(f" EXACT PHRASE SEARCH: '{phrase}'")
         
         idxs = indices or RAG_FILES_INDICES
 
         # Round 1: match_phrase slop=0
-        resp1 = self.es.es_exact_phrase_content(phrase, indices=idxs, size=size)
+        resp1_raw = self.es.es_exact_phrase_content(phrase, indices=idxs, size=size)
+        resp1 = dict(resp1_raw) if hasattr(resp1_raw, '__iter__') else {}
         hits1, total1 = self._es_to_hits(resp1, phrase=phrase, exact_level="phrase")
-        print(f"📊 ES EXACT PHRASE: {total1} hits")
+        print(f" ES EXACT PHRASE: {total1} hits")
 
         rounds = [{"kind": "phrase", "total": total1, "hits": hits1}]
 
@@ -148,10 +157,27 @@ class Tools:
             }
 
         # Round 2 fallback: strict AND match (still no fuzziness)
-        resp2 = self.es.es_exact_fallback_and(phrase, indices=idxs, size=size)
+        resp2_raw = self.es.es_exact_fallback_and(phrase, indices=idxs, size=size)
+        resp2 = dict(resp2_raw) if hasattr(resp2_raw, '__iter__') else {}
         hits2, total2 = self._es_to_hits(resp2, phrase=phrase, exact_level="and_fallback")
         print(f"📊 ES AND FALLBACK: {total2} hits")
         rounds.append({"kind": "and_fallback", "total": total2, "hits": hits2})
+
+        # Round 3: Chroma vector search (semantic similarity for phrase)
+        chroma_hits = self.search_chunks(phrase, top_k=10)
+        print(f"📊 CHROMA PHRASE: {len(chroma_hits)} hits")
+        if chroma_hits:
+            rounds.append({"kind": "chroma_phrase", "total": len(chroma_hits), "hits": chroma_hits})
+            # Merge ES and Chroma results
+            merged_hits = self._dedup_merge(hits2, chroma_hits)
+            return {
+                "mode": "exact_phrase",
+                "phrase": phrase,
+                "indices": idxs,
+                "rounds": rounds,
+                "best_hits": merged_hits[:size],
+                "total_hits": len(merged_hits),
+            }
 
         return {
             "mode": "exact_phrase",
@@ -200,7 +226,9 @@ class Tools:
         idxs = indices or RAG_FILES_INDICES
 
         # ES BM25
-        es_resp = self.es.es_bm25_search_content(query, indices=idxs, size=es_size, ext_filter=ext_filter)
+        es_resp_raw = self.es.es_bm25_search_content(query, indices=idxs, size=es_size, ext_filter=ext_filter)
+        # Convert ObjectApiResponse to dict
+        es_resp = dict(es_resp_raw) if hasattr(es_resp_raw, '__iter__') else {}
         es_hits, es_total = self._es_to_hits(es_resp, exact_level="bm25")
         print(f"📊 ES BM25: {es_total} hits")
 
@@ -279,11 +307,19 @@ class Tools:
         
         out = []
         for i, (doc, meta, id_val, dist) in enumerate(combined[:k]):
+            # Convert Chroma format to legacy format expected by _build_sources
+            path = (meta.get("original_path") or meta.get("file_path") or meta.get("path") or "") if meta else ""
+            filename = (meta.get("filename") or meta.get("file", {}).get("filename") or "") if meta else ""
             out.append({
                 "id": id_val,
                 "distance": dist,
                 "text": doc,
                 "metadata": meta,
+                # Legacy format fields for _build_sources
+                "file": {"path": path, "filename": filename},
+                "snippet": doc[:500] if doc else "",
+                "score": 1.0 - (dist if dist else 0.0),  # Convert distance to score
+                "source": "chroma",
             })
         return out
 

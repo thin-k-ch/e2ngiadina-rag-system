@@ -1,3 +1,30 @@
+# --- SENSITIVE DATA - NEVER COMMIT ---
+# Tools and binaries
+tools/
+!tools/.gitkeep
+*.zip
+*.tar.gz
+*.tar.bz2
+*.rar
+
+# Debug bundles
+e2ngiadina_debug_bundle_*.zip
+
+# Index data and large files
+index_files_to_es.py
+*.idx
+*.index
+*.db
+*.sqlite
+*.sqlite3
+
+# Local data directories
+data/
+indices/
+index_data/
+
+# --- END SENSITIVE DATA ---
+
 # WINDSURF RAG System - Git Ignore
 
 # Environment Variables
