@@ -160,7 +160,7 @@ def health():
 
 @app.get("/v1/models")
 async def models():
-    """List available models from Ollama + RAG variants"""
+    """List available RAG models (ollama models with rag- prefix)"""
     try:
         # Fetch models from Ollama
         import httpx
@@ -168,15 +168,17 @@ async def models():
             r = await client.get(f"{ollama_base}/api/tags")
             ollama_models = r.json().get("models", [])
         
-        # Format for OpenAI-compatible response
+        # Format for OpenAI-compatible response with rag- prefix
         data = []
         for m in ollama_models:
             model_id = m.get("name", m.get("model", ""))
+            # Add rag- prefix to distinguish from raw Ollama models
+            rag_model_id = f"rag-{model_id}"
             data.append({
-                "id": model_id,
+                "id": rag_model_id,
                 "object": "model",
                 "created": 0,
-                "owned_by": "ollama"
+                "owned_by": "rag-pipeline"
             })
         
         return {"object": "list", "data": data}
@@ -185,9 +187,9 @@ async def models():
         return {
             "object": "list",
             "data": [
-                {"id": "llama4:latest", "object": "model", "created": 0, "owned_by": "ollama"},
-                {"id": "apertus:70b-instruct-2509-q4_k_m", "object": "model", "created": 0, "owned_by": "ollama"},
-                {"id": "qwen2.5:3b", "object": "model", "created": 0, "owned_by": "ollama"},
+                {"id": "rag-llama4:latest", "object": "model", "created": 0, "owned_by": "rag-pipeline"},
+                {"id": "rag-apertus:70b-instruct-2509-q4_k_m", "object": "model", "created": 0, "owned_by": "rag-pipeline"},
+                {"id": "rag-qwen2.5:3b", "object": "model", "created": 0, "owned_by": "rag-pipeline"},
             ]
         }
 
@@ -227,8 +229,8 @@ async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = Non
         user_text = user_text.replace("[ADVANCED]", "").strip()
     
     if use_simple_rag:
-        # MVP: Simple RAG Pipeline - use selected model
-        selected_model = req.model or "llama4:latest"
+        # MVP: Simple RAG Pipeline - use selected model (strip rag- prefix)
+        selected_model = (req.model or "llama4:latest").replace("rag-", "", 1)
         
         # Create pipeline with selected model
         from .rag_pipeline import create_pipeline
@@ -312,8 +314,8 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
             try:
                 user_text = next((m.content for m in req.messages[::-1] if m.role == "user"), "")
                 
-                # MVP: SimpleRAG with selected model
-                selected_model = model or "llama4:latest"
+                # MVP: SimpleRAG with selected model (strip rag- prefix)
+                selected_model = model.replace("rag-", "", 1) if model.startswith("rag-") else (model or "llama4:latest")
                 from .rag_pipeline import create_pipeline
                 pipeline = create_pipeline("simple", model=selected_model)
                 

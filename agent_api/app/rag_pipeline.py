@@ -306,9 +306,9 @@ class SimpleRAGPipeline(RAGPipeline):
                 answer_parts.append(event.data.get("content", ""))
                 yield event
             elif event.type == "complete":
-                # Build sources from RANKED hits (top 5)
+                # Build sources from RANKED hits (top 40 for comprehensive overview)
                 sources = []
-                for i, hit in enumerate(ranked_hits[:5], 1):
+                for i, hit in enumerate(ranked_hits[:40], 1):
                     sources.append({
                         "n": i,
                         "path": hit.get("path", hit.get("file", {}).get("path", "")),
