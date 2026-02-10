@@ -38,6 +38,7 @@ from .config_pipeline import (
     RAG_PDF_MSG_BONUS,
     RAG_MAX_CONTEXT_DOCS,
     RAG_MAX_SOURCES,
+    RAG_ANSWER_TEMPERATURE,
 )
 
 
