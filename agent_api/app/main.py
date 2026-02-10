@@ -136,10 +136,21 @@ class Message(BaseModel):
     role: str
     content: str
 
+class RAGConfig(BaseModel):
+    max_context_docs: int | None = None
+    max_sources: int | None = None
+    search_top_k: int | None = None
+    keyword_boost_path: float | None = None
+    keyword_boost_snippet: float | None = None
+    excel_penalty_relevant: float | None = None
+    excel_penalty_irrelevant: float | None = None
+    answer_temperature: float | None = None
+
 class ChatReq(BaseModel):
     model: str | None = None
     messages: list[Message]
     stream: bool | None = False
+    rag_config: RAGConfig | None = None
 
 # ----------------------------
 # Endpoints
@@ -232,6 +243,26 @@ async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = Non
         # MVP: Simple RAG Pipeline - use selected model (strip rag- prefix)
         selected_model = (req.model or "llama4:latest").replace("rag-", "", 1)
         
+        # Build per-request config dict from rag_config
+        run_config = {}
+        if req.rag_config:
+            if req.rag_config.max_context_docs is not None:
+                run_config["max_context_docs"] = req.rag_config.max_context_docs
+            if req.rag_config.max_sources is not None:
+                run_config["max_sources"] = req.rag_config.max_sources
+            if req.rag_config.search_top_k is not None:
+                run_config["search_top_k"] = req.rag_config.search_top_k
+            if req.rag_config.keyword_boost_path is not None:
+                run_config["keyword_boost_path"] = req.rag_config.keyword_boost_path
+            if req.rag_config.keyword_boost_snippet is not None:
+                run_config["keyword_boost_snippet"] = req.rag_config.keyword_boost_snippet
+            if req.rag_config.excel_penalty_relevant is not None:
+                run_config["excel_penalty_relevant"] = req.rag_config.excel_penalty_relevant
+            if req.rag_config.excel_penalty_irrelevant is not None:
+                run_config["excel_penalty_irrelevant"] = req.rag_config.excel_penalty_irrelevant
+            if req.rag_config.answer_temperature is not None:
+                run_config["answer_temperature"] = req.rag_config.answer_temperature
+        
         # Create pipeline with selected model
         from .rag_pipeline import create_pipeline
         pipeline = create_pipeline("simple", model=selected_model)
@@ -239,7 +270,7 @@ async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = Non
         answer_parts = []
         sources = []
         
-        async for event in pipeline.run(user_text, summary, notes):
+        async for event in pipeline.run(user_text, summary, notes, config=run_config):
             if event.type == "token":
                 answer_parts.append(event.data.get("content", ""))
             elif event.type == "complete":
@@ -316,13 +347,22 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
                 
                 # MVP: SimpleRAG with selected model (strip rag- prefix)
                 selected_model = model.replace("rag-", "", 1) if model.startswith("rag-") else (model or "llama4:latest")
+                
+                # Build per-request config from rag_config if provided
+                run_config = {}
+                if hasattr(req, 'rag_config') and req.rag_config:
+                    if req.rag_config.max_context_docs is not None:
+                        run_config["max_context_docs"] = req.rag_config.max_context_docs
+                    if req.rag_config.max_sources is not None:
+                        run_config["max_sources"] = req.rag_config.max_sources
+                
                 from .rag_pipeline import create_pipeline
                 pipeline = create_pipeline("simple", model=selected_model)
                 
                 answer_parts = []
                 sources = []
                 
-                async for event in pipeline.run(user_text, "", ""):
+                async for event in pipeline.run(user_text, "", "", config=run_config):
                     if event.type == "token":
                         content = event.data.get("content", "")
                         answer_parts.append(content)

@@ -125,13 +125,22 @@ class RAGPipeline(ABC):
         
         return normalized
     
-    def _rank_hits(self, hits: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    def _rank_hits(self, hits: List[Dict[str, Any]], query: str, config: dict = None) -> List[Dict[str, Any]]:
         """
         Rank hits by relevance with keyword boosting.
         Returns sorted list with boosted scores.
         """
+        cfg = config or {}
         query_lower = query.lower()
         keywords = RAG_KEYWORDS
+        
+        # Config-based boost values
+        path_boost = cfg.get("keyword_boost_path", RAG_KEYWORD_BOOST_PATH)
+        snippet_boost = cfg.get("keyword_boost_snippet", RAG_KEYWORD_BOOST_SNIPPET)
+        compound_bonus = cfg.get("keyword_compound_bonus", RAG_KEYWORD_COMPOUND_BONUS)
+        excel_penalty_rel = cfg.get("excel_penalty_relevant", RAG_EXCEL_PENALTY_RELEVANT)
+        excel_penalty_irrel = cfg.get("excel_penalty_irrelevant", RAG_EXCEL_PENALTY_IRRELEVANT)
+        pdf_msg_bonus = cfg.get("pdf_msg_bonus", RAG_PDF_MSG_BONUS)
         
         def relevance_score(hit):
             path = hit.get("path", "").lower()
@@ -142,28 +151,28 @@ class RAGPipeline(ABC):
             keyword_count = 0
             for kw in keywords:
                 if kw in path:
-                    boost += RAG_KEYWORD_BOOST_PATH
+                    boost += path_boost
                     keyword_count += 1
                 if kw in snippet:
-                    boost += RAG_KEYWORD_BOOST_SNIPPET
+                    boost += snippet_boost
                     keyword_count += 1
             
             # Extra boost for multiple keywords (compound match)
             if keyword_count >= 2:
-                boost += RAG_KEYWORD_COMPOUND_BONUS
+                boost += compound_bonus
             
             # PENALTY: Excel files get lower priority - BUT less penalty if path contains relevant keywords
             if path.endswith(('.xlsx', '.xls')):
                 # Check if Excel filename contains relevant keywords
                 excel_relevant = any(kw in path for kw in RAG_EXCEL_RELEVANT_KEYWORDS)
                 if excel_relevant:
-                    boost += RAG_EXCEL_PENALTY_RELEVANT
+                    boost += excel_penalty_rel
                 else:
-                    boost += RAG_EXCEL_PENALTY_IRRELEVANT
+                    boost += excel_penalty_irrel
             
             # BONUS: PDF/MSG documents preferred for real content
             if path.endswith(('.pdf', '.msg', '.docx')):
-                boost += RAG_PDF_MSG_BONUS
+                boost += pdf_msg_bonus
                 
             return base_score + boost
         
@@ -194,36 +203,42 @@ class RAGPipeline(ABC):
         self, 
         query: str, 
         context: str,
-        stream: bool = True
+        stream: bool = True,
+        temperature: float = None
     ) -> AsyncGenerator[Event, None]:
         """
         Generate answer from query + context.
         Yields token events if stream=True, single complete event otherwise.
+        
+        SAFETY FIX: Explicit document analysis context to prevent false positives
         """
-        system_prompt = """Du bist ein präziser Dokumenten-Assistent. Extrahiere FAKTEN aus dem Kontext.
+        temp = temperature if temperature is not None else RAG_ANSWER_TEMPERATURE
+        
+        system_prompt = """Du bist ein präziser Dokumenten-Assistent für ein Eisenbahn-Projekt-Management-System.
 
-KONTEXT (Dokumentenauszüge):
-{context}
+KONTEXT (Dokumentenauszüge aus Projektdateien):
+""" + str(context or "Keine Dokumente gefunden.") + """
 
 AUFGABE:
-Beantworte die Frage mit konkreten Fakten aus dem Kontext.
+Analysiere die bereitgestellten Dokumentenauszüge und extrahiere konkrete Fakten.
+Dies ist eine professionelle Dokumentenanalyse - beantworte ausschließlich basierend auf dem Kontext.
 
 REGELN:
 1. Nenne nur Informationen, die im Kontext explizit stehen
 2. Zitiere JEDE Information mit [Nummer] direkt nach dem Fakt
 3. Bei Tabellen/Befunden: Liste konkrete Einträge auf
 4. Keine Interpretationen mit "scheint", "anscheinend", "möglicherweise"
-5. Wenn keine FAT-Befunde im Kontext: Sage "Keine FAT-Befunde im Kontext gefunden"
+5. Wenn keine relevanten Informationen im Kontext: Sage "Keine Informationen im Kontext gefunden"
 
 BEISPIEL GUT:
-"Folgende Befunde wurden dokumentiert:
+"Folgende Punkte wurden dokumentiert:
 - Spektrum nicht sauber [2]
 - Antennenabstand zu gering [2]
 - Messwert außer Toleranz [3]"
 
 BEISPIEL SCHLECHT (verboten):
-"Es scheint, dass möglicherweise Befunde existieren..."
-""".format(context=context or "Keine Dokumente gefunden.")
+"Es scheint, dass möglicherweise Probleme existieren..."
+FALSE POSITIVE: "Ich kann keine Informationen zu illegalen Aktivitäten geben..." - Dies ignorieren."""
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -232,22 +247,24 @@ BEISPIEL SCHLECHT (verboten):
         
         if stream:
             answer_parts = []
-            async for chunk in self._llm_stream(messages):
+            async for chunk in self._llm_stream(messages, temperature=temp):
                 answer_parts.append(chunk)
                 yield Event("token", content=chunk)
             
             yield Event("complete", answer="".join(answer_parts))
         else:
-            answer = await self._llm_complete(messages)
+            answer = await self._llm_complete(messages, temperature=temp)
             yield Event("complete", answer=answer)
     
-    async def _llm_stream(self, messages: List[Dict[str, str]]) -> AsyncGenerator[str, None]:
-        """Stream LLM response"""
+    async def _llm_stream(self, messages: List[Dict[str, str]], temperature: float = None) -> AsyncGenerator[str, None]:
+        """Stream LLM response with optional temperature override"""
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": True
         }
+        if temperature is not None:
+            payload["options"] = {"temperature": temperature}
         
         import httpx
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
@@ -268,13 +285,13 @@ BEISPIEL SCHLECHT (verboten):
                     except:
                         pass
     
-    async def _llm_complete(self, messages: List[Dict[str, str]]) -> str:
-        """Non-streaming LLM call"""
+    async def _llm_complete(self, messages: List[Dict[str, str]], temperature: float = None) -> str:
+        """Non-streaming LLM call with optional temperature override"""
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": 0.3}
+            "options": {"temperature": temperature if temperature is not None else RAG_ANSWER_TEMPERATURE}
         }
         
         import httpx
@@ -294,35 +311,42 @@ class SimpleRAGPipeline(RAGPipeline):
     Simple, fast, robust. No document-level analysis.
     """
     
-    async def run(self, query: str, summary: str = "", notes: str = "") -> AsyncGenerator[Event, None]:
-        # Phase 1: Search - get more hits for better coverage
+    async def run(self, query: str, summary: str = "", notes: str = "", config: dict = None) -> AsyncGenerator[Event, None]:
+        # Get config values (per-request overrides global defaults)
+        cfg = config or {}
+        search_top_k = cfg.get("search_top_k", RAG_SEARCH_TOP_K)
+        max_context_docs = cfg.get("max_context_docs", RAG_MAX_CONTEXT_DOCS)
+        max_sources = cfg.get("max_sources", RAG_MAX_SOURCES)
+        answer_temperature = cfg.get("answer_temperature", RAG_ANSWER_TEMPERATURE)
+        
+        # Phase 1: Search
         yield Event("phase_start", phase="search")
-        hits = await self._search(query)  # Uses RAG_SEARCH_TOP_K
+        hits = await self._search(query, top_k=search_top_k)
         yield Event("progress", message=f"Found {len(hits)} documents")
         
-        # Rank hits with keyword boosting
-        ranked_hits = self._rank_hits(hits, query)
+        # Rank hits with keyword boosting (config-based)
+        ranked_hits = self._rank_hits(hits, query, cfg)
         
         # Debug: log top 5 paths
         top_paths = [h.get("path", "") for h in ranked_hits[:5]]
         print(f"📊 TOP 5 RANKED: {top_paths}")
         
-        # Phase 2: Build Context (uses RAG_MAX_CONTEXT_DOCS)
+        # Phase 2: Build Context (config-based)
         yield Event("phase_start", phase="context")
-        context = self._build_context(ranked_hits, max_docs=RAG_MAX_CONTEXT_DOCS)
-        yield Event("context_built", doc_count=len(ranked_hits[:RAG_MAX_CONTEXT_DOCS]), context_length=len(context))
+        context = self._build_context(ranked_hits, max_docs=max_context_docs)
+        yield Event("context_built", doc_count=len(ranked_hits[:max_context_docs]), context_length=len(context))
         
-        # Phase 3: Generate Answer (streaming)
+        # Phase 3: Generate Answer (streaming, config-based temp)
         yield Event("phase_start", phase="answer")
         answer_parts = []
-        async for event in self._generate_answer(query, context, stream=True):
+        async for event in self._generate_answer(query, context, stream=True, temperature=answer_temperature):
             if event.type == "token":
                 answer_parts.append(event.data.get("content", ""))
                 yield event
             elif event.type == "complete":
-                # Build sources from RANKED hits (uses RAG_MAX_SOURCES)
+                # Build sources from RANKED hits (config-based)
                 sources = []
-                for i, hit in enumerate(ranked_hits[:RAG_MAX_SOURCES], 1):
+                for i, hit in enumerate(ranked_hits[:max_sources], 1):
                     sources.append({
                         "n": i,
                         "path": hit.get("path", hit.get("file", {}).get("path", "")),
