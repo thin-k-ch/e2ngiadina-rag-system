@@ -169,7 +169,9 @@ async def models():
         
         # Format for OpenAI-compatible response with rag- prefix
         # Skip embedding models (not usable for chat)
+        # Add -think variants for models >= 14B
         skip_keywords = ["embed", "embedding"]
+        think_min_size = 10 * 1e9  # 10GB minimum for thinking mode
         data = []
         for m in ollama_models:
             model_id = m.get("name", m.get("model", ""))
@@ -182,6 +184,15 @@ async def models():
                 "created": 0,
                 "owned_by": "rag-pipeline"
             })
+            # Add thinking variant for larger models
+            model_size = m.get("size", 0)
+            if model_size >= think_min_size:
+                data.append({
+                    "id": f"rag-{model_id}-think",
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "rag-pipeline-think"
+                })
         
         return {"object": "list", "data": data}
     except Exception as e:
@@ -350,8 +361,9 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
             try:
                 user_text = next((m.content for m in req.messages[::-1] if m.role == "user"), "")
                 
-                # MVP: SimpleRAG with selected model (strip rag- prefix)
+                # MVP: SimpleRAG with selected model (strip rag- prefix and -think suffix)
                 selected_model = model.replace("rag-", "", 1) if model.startswith("rag-") else (model or "llama4:latest")
+                selected_model = selected_model.replace("-think", "")
                 
                 # Resolve conversation ID for session state
                 conv_id = x_conversation_id or hashlib.md5(user_text.encode()).hexdigest()[:12]
@@ -436,13 +448,17 @@ Aufgabe: {user_text}"""
                     if req.rag_config.max_sources is not None:
                         run_config["max_sources"] = req.rag_config.max_sources
                 
+                # Detect thinking mode from model name suffix
+                enable_thinking = "-think" in model.lower() or ":think" in model.lower()
+                print(f"🧠 Model='{model}', selected='{selected_model}', thinking={enable_thinking}")
+                
                 from .rag_pipeline import create_pipeline
                 pipeline = create_pipeline("simple", model=selected_model)
                 
                 answer_parts = []
                 sources = []
                 
-                async for event in pipeline.run(user_text, "", "", config=run_config):
+                async for event in pipeline.run(user_text, "", "", config=run_config, thinking=enable_thinking):
                     if event.type == "token":
                         content = event.data.get("content", "")
                         answer_parts.append(content)

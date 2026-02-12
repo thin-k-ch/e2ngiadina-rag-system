@@ -223,17 +223,20 @@ class RAGPipeline(ABC):
         query: str, 
         context: str,
         stream: bool = True,
-        temperature: float = None
+        temperature: float = None,
+        thinking: bool = False
     ) -> AsyncGenerator[Event, None]:
         """
         Generate answer from query + context.
         Yields token events if stream=True, single complete event otherwise.
         
-        SAFETY FIX: Explicit document analysis context to prevent false positives
+        When thinking=True, the LLM first reasons inside <think> tags,
+        then provides the final answer. OpenWebUI renders <think> blocks
+        as collapsible "Thinking" sections.
         """
         temp = temperature if temperature is not None else RAG_ANSWER_TEMPERATURE
         
-        system_prompt = """DU BIST EIN DOKUMENTEN-ANALYST FÜR SCHWEIZER EISENBAHN-PROJEKTE (SBB TFK 2020 - Tunnelfunk).
+        base_prompt = """DU BIST EIN DOKUMENTEN-ANALYST FÜR SCHWEIZER EISENBAHN-PROJEKTE (SBB TFK 2020 - Tunnelfunk).
 Fachgebiete: Projektleitung, Programmleitung, Funktechnik, Tunnelfunk.
 
 FACHBEGRIFFE: FAT=Werksabnahme, SAT=Standortabnahme, TFK=Tunnelfunk, GBT=Gotthard Basistunnel, RBT=Rhomberg Bahntechnik
@@ -247,34 +250,75 @@ ANTWORT-FORMAT (ZWINGEND):
 4. Nutze Aufzählungen und kurze Absätze
 5. Wenn Dokumente Informationen enthalten, ZITIERE sie - sage NIEMALS "die Dokumente sind allgemein"
 
-BEISPIEL einer korrekten Antwort:
----
-Laut [1] findet das Supplier Board monatlich statt. Teilnehmer sind gemäss [2]:
-- Projektleitung SBB
-- Rhomberg Bahntechnik (Lieferant)
-Hauptthemen laut [3]: Lieferstatus, offene Punkte, Terminplan.
----
-
 WICHTIG: Dir werden Dokumente als Kontext bereitgestellt. Nutze sie IMMER und zitiere daraus.
 """
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-        ]
-        if context:
-            messages.append({"role": "system", "content": f"DOKUMENT-KONTEXT:\n{context}"})
-        messages.append({"role": "user", "content": query})
-        
-        if stream:
+        if thinking:
+            # TWO-CALL THINKING MODE:
+            # Call 1: Analysis (streamed inside <think> tags)
+            # Call 2: Final answer (streamed normally)
+            
+            thinking_prompt = """Analysiere die folgenden Dokumente im Kontext der Frage.
+Identifiziere:
+1. Welche Dokumente [N] enthalten relevante Informationen?
+2. Was sind die Kernfakten?
+3. Gibt es Widersprüche oder Lücken?
+4. Wie sollte die Antwort strukturiert werden?
+
+Sei gründlich aber knapp. Antworte auf Deutsch."""
+            
+            think_messages = [
+                {"role": "system", "content": thinking_prompt},
+            ]
+            if context:
+                think_messages.append({"role": "system", "content": f"DOKUMENT-KONTEXT:\n{context}"})
+            think_messages.append({"role": "user", "content": query})
+            
+            # Stream thinking phase inside <think> tags
+            yield Event("token", content="<think>\n")
+            thinking_parts = []
+            async for chunk in self._llm_stream(think_messages, temperature=0.7):
+                thinking_parts.append(chunk)
+                yield Event("token", content=chunk)
+            yield Event("token", content="\n</think>\n\n")
+            
+            # Build answer messages with thinking result as context
+            thinking_result = "".join(thinking_parts)
+            answer_messages = [
+                {"role": "system", "content": base_prompt},
+            ]
+            if context:
+                answer_messages.append({"role": "system", "content": f"DOKUMENT-KONTEXT:\n{context}"})
+            answer_messages.append({"role": "assistant", "content": f"Meine Analyse:\n{thinking_result}"})
+            answer_messages.append({"role": "user", "content": f"Basierend auf deiner Analyse, beantworte jetzt: {query}"})
+            
+            # Stream final answer
             answer_parts = []
-            async for chunk in self._llm_stream(messages, temperature=temp):
+            async for chunk in self._llm_stream(answer_messages, temperature=temp):
                 answer_parts.append(chunk)
                 yield Event("token", content=chunk)
             
             yield Event("complete", answer="".join(answer_parts))
         else:
-            answer = await self._llm_complete(messages, temperature=temp)
-            yield Event("complete", answer=answer)
+            # STANDARD MODE: single call
+            system_prompt = base_prompt
+            messages = [
+                {"role": "system", "content": system_prompt},
+            ]
+            if context:
+                messages.append({"role": "system", "content": f"DOKUMENT-KONTEXT:\n{context}"})
+            messages.append({"role": "user", "content": query})
+            
+            if stream:
+                answer_parts = []
+                async for chunk in self._llm_stream(messages, temperature=temp):
+                    answer_parts.append(chunk)
+                    yield Event("token", content=chunk)
+                
+                yield Event("complete", answer="".join(answer_parts))
+            else:
+                answer = await self._llm_complete(messages, temperature=temp)
+                yield Event("complete", answer=answer)
     
     async def _llm_stream(self, messages: List[Dict[str, str]], temperature: float = None) -> AsyncGenerator[str, None]:
         """Stream LLM response with optional temperature override"""
@@ -331,7 +375,7 @@ class SimpleRAGPipeline(RAGPipeline):
     Simple, fast, robust. No document-level analysis.
     """
     
-    async def run(self, query: str, summary: str = "", notes: str = "", config: dict = None) -> AsyncGenerator[Event, None]:
+    async def run(self, query: str, summary: str = "", notes: str = "", config: dict = None, thinking: bool = False) -> AsyncGenerator[Event, None]:
         # Apply glossary query rewrite for domain disambiguation
         from .glossary import rewrite_query
         rewritten_query, query_meta = rewrite_query(query)
@@ -367,7 +411,7 @@ class SimpleRAGPipeline(RAGPipeline):
         # Phase 3: Generate Answer (streaming, config-based temp)
         yield Event("phase_start", phase="answer")
         answer_parts = []
-        async for event in self._generate_answer(query, context, stream=True, temperature=answer_temperature):
+        async for event in self._generate_answer(query, context, stream=True, temperature=answer_temperature, thinking=thinking):
             if event.type == "token":
                 answer_parts.append(event.data.get("content", ""))
                 yield event
