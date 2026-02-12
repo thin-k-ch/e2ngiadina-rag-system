@@ -255,7 +255,7 @@ Laut [1] findet das Supplier Board monatlich statt. Teilnehmer sind gemäss [2]:
 Hauptthemen laut [3]: Lieferstatus, offene Punkte, Terminplan.
 ---
 
-WENN KEINE relevanten Dokumente: Sage "Keine relevanten Dokumente gefunden."
+WICHTIG: Dir werden Dokumente als Kontext bereitgestellt. Nutze sie IMMER und zitiere daraus.
 """
 
         messages = [
