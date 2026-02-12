@@ -548,6 +548,27 @@ Aufgabe: {user_text}"""
                 # Keep only last 6 messages (3 turns) to avoid context overflow
                 chat_history = chat_history[-6:]
                 
+                # For follow-ups: load previous source documents for context
+                prev_doc_context = ""
+                if chat_history:
+                    last_session = store.load("last_sources")
+                    prev_sources = last_session.get("sources", [])
+                    if prev_sources:
+                        # Fetch full text for previous sources (max 3, to limit context size)
+                        doc_parts = []
+                        for i, src in enumerate(prev_sources[:3], 1):
+                            src_path = src.get("path", "")
+                            src_display = src.get("display_path", src_path)
+                            doc_text, _ = await fetch_document_text(src_path)
+                            if doc_text:
+                                max_per_doc = 6000
+                                if len(doc_text) > max_per_doc:
+                                    doc_text = doc_text[:max_per_doc] + f"\n[... gekürzt, {len(doc_text)} Zeichen total]"
+                                doc_parts.append(f"[{i}] {src_display}:\n{doc_text}")
+                        if doc_parts:
+                            prev_doc_context = "\n\n---\n\n".join(doc_parts)
+                            print(f"📎 Follow-up: loaded {len(doc_parts)} previous source docs as context")
+                
                 # Detect thinking mode from model name suffix
                 enable_thinking = "-think" in model.lower() or ":think" in model.lower()
                 print(f"🧠 Model='{model}', selected='{selected_model}', thinking={enable_thinking}, history={len(chat_history)} msgs")
@@ -558,7 +579,7 @@ Aufgabe: {user_text}"""
                 answer_parts = []
                 sources = []
                 
-                async for event in pipeline.run(user_text, "", "", config=run_config, thinking=enable_thinking, chat_history=chat_history):
+                async for event in pipeline.run(user_text, "", "", config=run_config, thinking=enable_thinking, chat_history=chat_history, prev_doc_context=prev_doc_context):
                     if event.type == "token":
                         content = event.data.get("content", "")
                         answer_parts.append(content)

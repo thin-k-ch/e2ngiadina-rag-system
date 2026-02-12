@@ -384,7 +384,7 @@ class SimpleRAGPipeline(RAGPipeline):
     Simple, fast, robust. No document-level analysis.
     """
     
-    async def run(self, query: str, summary: str = "", notes: str = "", config: dict = None, thinking: bool = False, chat_history: list = None) -> AsyncGenerator[Event, None]:
+    async def run(self, query: str, summary: str = "", notes: str = "", config: dict = None, thinking: bool = False, chat_history: list = None, prev_doc_context: str = "") -> AsyncGenerator[Event, None]:
         # Apply glossary query rewrite for domain disambiguation
         from .glossary import rewrite_query
         rewritten_query, query_meta = rewrite_query(query)
@@ -393,6 +393,43 @@ class SimpleRAGPipeline(RAGPipeline):
             print(f"   Expansions: {query_meta.get('expansions', [])}")
         query = rewritten_query  # Use expanded query
         
+        # Context-aware query expansion for follow-ups
+        # When there's chat history, the current query may be contextual
+        # (e.g., "zeige mir die Fehler" after asking about Manteldokumente)
+        # Extract key terms from the previous user query and combine
+        search_query = query
+        if chat_history:
+            import re
+            stop_words = {"der", "die", "das", "den", "dem", "des", "ein", "eine", "einer",
+                          "und", "oder", "aber", "für", "mit", "von", "aus", "bei", "auf",
+                          "ist", "sind", "was", "wie", "wer", "ich", "mir", "alle", "sich",
+                          "nicht", "auch", "nach", "über", "unter", "nur", "noch", "kann",
+                          "wird", "hat", "sein", "haben", "werden", "diese", "dieser",
+                          "diesen", "diesem", "suche", "suchen", "finde", "finden",
+                          "zeige", "zeigen", "gib", "system", "abgelegt", "inhalt",
+                          "bitte", "kannst", "welche", "welcher", "welches", "mache",
+                          "brauche", "möchte", "jeden", "jede", "jedes", "einzelnen"}
+            # Get previous user queries (all of them)
+            prev_user_terms = set()
+            for msg in chat_history:
+                if msg.get("role") == "user":
+                    terms = re.findall(r'[a-zäöüß0-9]+', msg["content"].lower())
+                    for t in terms:
+                        if len(t) >= 3 and t not in stop_words:
+                            prev_user_terms.add(t)
+            
+            # Get current query terms
+            current_terms = set(re.findall(r'[a-zäöüß0-9]+', query.lower()))
+            current_terms = {t for t in current_terms if len(t) >= 3 and t not in stop_words}
+            
+            # Add previous terms that aren't already in current query
+            new_terms = prev_user_terms - current_terms
+            if new_terms:
+                # Limit expansion to most relevant terms (max 5)
+                expansion = " ".join(list(new_terms)[:5])
+                search_query = f"{query} {expansion}"
+                print(f"🔄 Follow-up query expansion: '{query}' → '{search_query[:100]}...'")
+        
         # Get config values (per-request overrides global defaults)
         cfg = config or {}
         search_top_k = cfg.get("search_top_k", RAG_SEARCH_TOP_K)
@@ -400,9 +437,9 @@ class SimpleRAGPipeline(RAGPipeline):
         max_sources = cfg.get("max_sources", RAG_MAX_SOURCES)
         answer_temperature = cfg.get("answer_temperature", RAG_ANSWER_TEMPERATURE)
         
-        # Phase 1: Search
+        # Phase 1: Search (use expanded query for follow-ups)
         yield Event("phase_start", phase="search")
-        hits = await self._search(query, top_k=search_top_k)
+        hits = await self._search(search_query, top_k=search_top_k)
         yield Event("progress", message=f"Found {len(hits)} documents")
         
         # Rank hits with keyword boosting (config-based)
@@ -415,6 +452,11 @@ class SimpleRAGPipeline(RAGPipeline):
         # Phase 2: Build Context (config-based)
         yield Event("phase_start", phase="context")
         context = self._build_context(ranked_hits, max_docs=max_context_docs)
+        
+        # For follow-ups: prepend previous source documents to context
+        if prev_doc_context:
+            context = f"=== VORHERIGE DOKUMENTE (aus letzter Anfrage) ===\n{prev_doc_context}\n\n=== NEUE SUCHERGEBNISSE ===\n{context}"
+        
         yield Event("context_built", doc_count=len(ranked_hits[:max_context_docs]), context_length=len(context))
         
         # Phase 3: Generate Answer (streaming, config-based temp)
