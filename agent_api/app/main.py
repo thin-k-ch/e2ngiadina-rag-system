@@ -448,9 +448,19 @@ Aufgabe: {user_text}"""
                     if req.rag_config.max_sources is not None:
                         run_config["max_sources"] = req.rag_config.max_sources
                 
+                # Build conversation history from previous messages (for follow-up context)
+                chat_history = []
+                for m in req.messages[:-1]:  # All messages except the last (current) one
+                    if m.role in ("user", "assistant") and m.content:
+                        # Truncate long messages to keep context manageable
+                        content = m.content[:2000] if len(m.content) > 2000 else m.content
+                        chat_history.append({"role": m.role, "content": content})
+                # Keep only last 6 messages (3 turns) to avoid context overflow
+                chat_history = chat_history[-6:]
+                
                 # Detect thinking mode from model name suffix
                 enable_thinking = "-think" in model.lower() or ":think" in model.lower()
-                print(f"🧠 Model='{model}', selected='{selected_model}', thinking={enable_thinking}")
+                print(f"🧠 Model='{model}', selected='{selected_model}', thinking={enable_thinking}, history={len(chat_history)} msgs")
                 
                 from .rag_pipeline import create_pipeline
                 pipeline = create_pipeline("simple", model=selected_model)
@@ -458,7 +468,7 @@ Aufgabe: {user_text}"""
                 answer_parts = []
                 sources = []
                 
-                async for event in pipeline.run(user_text, "", "", config=run_config, thinking=enable_thinking):
+                async for event in pipeline.run(user_text, "", "", config=run_config, thinking=enable_thinking, chat_history=chat_history):
                     if event.type == "token":
                         content = event.data.get("content", "")
                         answer_parts.append(content)

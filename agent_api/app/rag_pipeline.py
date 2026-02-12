@@ -224,7 +224,8 @@ class RAGPipeline(ABC):
         context: str,
         stream: bool = True,
         temperature: float = None,
-        thinking: bool = False
+        thinking: bool = False,
+        chat_history: list = None
     ) -> AsyncGenerator[Event, None]:
         """
         Generate answer from query + context.
@@ -272,6 +273,9 @@ Sei gründlich aber knapp. Antworte auf Deutsch."""
             ]
             if context:
                 think_messages.append({"role": "system", "content": f"DOKUMENT-KONTEXT:\n{context}"})
+            # Add conversation history for follow-up context
+            if chat_history:
+                think_messages.extend(chat_history)
             think_messages.append({"role": "user", "content": query})
             
             # Stream thinking phase inside <think> tags
@@ -289,6 +293,8 @@ Sei gründlich aber knapp. Antworte auf Deutsch."""
             ]
             if context:
                 answer_messages.append({"role": "system", "content": f"DOKUMENT-KONTEXT:\n{context}"})
+            if chat_history:
+                answer_messages.extend(chat_history)
             answer_messages.append({"role": "assistant", "content": f"Meine Analyse:\n{thinking_result}"})
             answer_messages.append({"role": "user", "content": f"Basierend auf deiner Analyse, beantworte jetzt: {query}"})
             
@@ -307,6 +313,9 @@ Sei gründlich aber knapp. Antworte auf Deutsch."""
             ]
             if context:
                 messages.append({"role": "system", "content": f"DOKUMENT-KONTEXT:\n{context}"})
+            # Add conversation history for follow-up context
+            if chat_history:
+                messages.extend(chat_history)
             messages.append({"role": "user", "content": query})
             
             if stream:
@@ -375,7 +384,7 @@ class SimpleRAGPipeline(RAGPipeline):
     Simple, fast, robust. No document-level analysis.
     """
     
-    async def run(self, query: str, summary: str = "", notes: str = "", config: dict = None, thinking: bool = False) -> AsyncGenerator[Event, None]:
+    async def run(self, query: str, summary: str = "", notes: str = "", config: dict = None, thinking: bool = False, chat_history: list = None) -> AsyncGenerator[Event, None]:
         # Apply glossary query rewrite for domain disambiguation
         from .glossary import rewrite_query
         rewritten_query, query_meta = rewrite_query(query)
@@ -411,7 +420,7 @@ class SimpleRAGPipeline(RAGPipeline):
         # Phase 3: Generate Answer (streaming, config-based temp)
         yield Event("phase_start", phase="answer")
         answer_parts = []
-        async for event in self._generate_answer(query, context, stream=True, temperature=answer_temperature, thinking=thinking):
+        async for event in self._generate_answer(query, context, stream=True, temperature=answer_temperature, thinking=thinking, chat_history=chat_history):
             if event.type == "token":
                 answer_parts.append(event.data.get("content", ""))
                 yield event
