@@ -252,6 +252,12 @@ ANTWORT-FORMAT (ZWINGEND):
 5. Wenn Dokumente Informationen enthalten, ZITIERE sie - sage NIEMALS "die Dokumente sind allgemein"
 
 WICHTIG: Dir werden Dokumente als Kontext bereitgestellt. Nutze sie IMMER und zitiere daraus.
+
+CODE-AUSFÜHRUNG: Du kannst Python-Code schreiben, der automatisch ausgeführt wird.
+Wenn du Daten analysieren, Dateien auflisten, zählen oder berechnen musst, schreibe einen ```python Code-Block.
+Der Code hat Zugriff auf: pandas (pd), tabulate, csv, os, json.
+Dateien liegen unter DATA_ROOT (='/data', entspricht dem Projektarchiv).
+Nutze print() für Ausgaben. Setze result='...' für das Hauptergebnis.
 """
 
         if thinking:

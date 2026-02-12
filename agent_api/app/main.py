@@ -587,6 +587,17 @@ Aufgabe: {user_text}"""
                     elif event.type == "complete":
                         sources = event.data.get("sources", [])
                 
+                # Auto-execute Python code blocks in the answer
+                full_answer = "".join(answer_parts)
+                from .code_executor import extract_code_blocks, execute_code, format_execution_result
+                code_blocks = extract_code_blocks(full_answer)
+                if code_blocks:
+                    for i, (lang, code) in enumerate(code_blocks):
+                        yield _sse_chunk(rid, created, model, {"content": f"\n\n⚙️ **Code wird ausgeführt...**\n"})
+                        exec_result = await execute_code(code)
+                        formatted = format_execution_result(exec_result)
+                        yield _sse_chunk(rid, created, model, {"content": f"\n📊 **Ergebnis:**\n```\n{formatted}\n```\n"})
+                
                 # Add sources at end with clickable links
                 if sources:
                     from urllib.parse import quote

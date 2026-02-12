@@ -120,8 +120,10 @@ services:
       - NO_INTERNET=1
       - TIMEOUT_SECONDS=25
       - LOG_PATH=/logs/runner.log
+      - DATA_ROOT=/data
     volumes:
       - /media/felix/RAG/1/volumes/logs:/logs
+      - /media/felix/RAG/1:/data:ro
     restart: unless-stopped
 
   elasticsearch:
