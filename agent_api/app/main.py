@@ -15,6 +15,8 @@ from .es_proxy import router as es_router
 
 app = FastAPI(title="AGENTIC RAG API")
 
+ollama_base = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+
 # Agent instances
 agent = Agent()
 orchestrator = AgentOrchestrator()
@@ -166,10 +168,13 @@ async def models():
             ollama_models = r.json().get("models", [])
         
         # Format for OpenAI-compatible response with rag- prefix
+        # Skip embedding models (not usable for chat)
+        skip_keywords = ["embed", "embedding"]
         data = []
         for m in ollama_models:
             model_id = m.get("name", m.get("model", ""))
-            # Add rag- prefix to distinguish from raw Ollama models
+            if any(kw in model_id.lower() for kw in skip_keywords):
+                continue
             rag_model_id = f"rag-{model_id}"
             data.append({
                 "id": rag_model_id,

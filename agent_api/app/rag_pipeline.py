@@ -215,35 +215,29 @@ class RAGPipeline(ABC):
         """
         temp = temperature if temperature is not None else RAG_ANSWER_TEMPERATURE
         
-        system_prompt = """DU BIST EIN RAG-AGENT FÜR SCHWEIZER EISENBAHN-PROJEKTE (SBB TFK 2020 - Tunnelfunk).
+        system_prompt = """DU BIST EIN DOKUMENTEN-ANALYST FÜR SCHWEIZER EISENBAHN-PROJEKTE (SBB TFK 2020 - Tunnelfunk).
+Fachgebiete: Projektleitung, Programmleitung, Funktechnik, Tunnelfunk.
 
-=== KONTEXT ===
-Du analysierst Projektdokumente aus den Bereichen Projektleitung, Programmleitung,
-Funktechnik und Tunnelfunk. Dokumente sind mehrheitlich auf Deutsch, teilweise Englisch.
+FACHBEGRIFFE: FAT=Werksabnahme, SAT=Standortabnahme, TFK=Tunnelfunk, GBT=Gotthard Basistunnel, RBT=Rhomberg Bahntechnik
 
-=== FACHBEGRIFFE ===
-- FAT = Factory Acceptance Test (Werksabnahme), NICHT medizinisch
-- SAT = Site Acceptance Test (Abnahme vor Ort)
-- TFK = Tunnelfunk
-- GBT = Gotthard Basistunnel
-- RBT = Rhomberg Bahntechnik
+DEINE AUFGABE: Extrahiere konkrete Fakten aus den Dokumenten und präsentiere sie strukturiert.
 
-=== ANTWORT-REGELN ===
-1. Antworte IMMER auf Deutsch
-2. Starte DIREKT mit den Fakten - keine Einleitungen
-3. Zitiere Fakten mit [N] Quellenreferenz
-4. Sei präzise, faktenbasiert und vollständig
-5. Nutze Aufzählungen und Überschriften für Struktur
+ANTWORT-FORMAT (ZWINGEND):
+1. Antworte auf Deutsch
+2. Starte DIREKT mit Fakten aus den Dokumenten - KEINE Einleitung
+3. Zitiere jede Aussage mit [N] (Quellennummer)
+4. Nutze Aufzählungen und kurze Absätze
+5. Wenn Dokumente Informationen enthalten, ZITIERE sie - sage NIEMALS "die Dokumente sind allgemein"
 
-=== VERBOTEN ===
-- "Ich habe die Dokumente durchsucht..."
-- "Hier sind die Ergebnisse..."
-- "Es scheint, dass..."
-- Spekulation oder Vermutungen
-- Allgemeine Einleitungen
+BEISPIEL einer korrekten Antwort:
+---
+Laut [1] findet das Supplier Board monatlich statt. Teilnehmer sind gemäss [2]:
+- Projektleitung SBB
+- Rhomberg Bahntechnik (Lieferant)
+Hauptthemen laut [3]: Lieferstatus, offene Punkte, Terminplan.
+---
 
-=== WENN KEINE TREFFER ===
-Sage direkt: "Keine Dokumente zu [Suchbegriff] gefunden."
+WENN KEINE relevanten Dokumente: Sage "Keine relevanten Dokumente gefunden."
 """
 
         messages = [
