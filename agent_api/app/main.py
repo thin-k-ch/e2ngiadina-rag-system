@@ -9,27 +9,13 @@ from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 from .agent_orchestrator import Agent, AgentOrchestrator
-from .rag_pipeline import SimpleRAGPipeline  # MVP: Simple RAG
+from .rag_pipeline import SimpleRAGPipeline
 from .state import StateStore
 from .es_proxy import router as es_router
-from .phase_strategy import StrategyAgent
-from .phase_retrieval import RetrievalAgent
-from .phase_analysis import AnalysisAgent
-from .phase_validation import ValidationAgent
-from .phase_answer import AnswerAgent
-from .thinking_agent import ThinkingAgent  # Phase 2: True reasoning agent
-from .chroma_client import ChromaClient
-from .tools import Tools
 
-app = FastAPI(title="AGENTIC RAG API - Thinking Mode Agent")
+app = FastAPI(title="AGENTIC RAG API")
 
-# Initialize tools and thinking agent
-ollama_base = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-llm_model = os.getenv("LLM_MODEL_ANSWER", "llama4:latest")
-tools = Tools()
-thinking_agent = ThinkingAgent(ollama_base, llm_model, tools)
-
-# Legacy agent for non-streaming fallback
+# Agent instances
 agent = Agent()
 orchestrator = AgentOrchestrator()
 
