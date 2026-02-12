@@ -109,3 +109,67 @@ def detect_code_request(query: str) -> bool:
     ]
     
     return any(indicator in query_lower for indicator in code_indicators)
+
+
+def detect_filesystem_query(query: str) -> Optional[str]:
+    """
+    Detect if query requires filesystem operations (counting, listing, browsing files).
+    These queries MUST use Python code execution, not search results.
+    
+    Returns a code-execution instruction string if detected, None otherwise.
+    """
+    query_lower = query.lower()
+    
+    # Patterns that indicate filesystem operations
+    fs_patterns = [
+        # Counting files
+        (r'(?:wie\s*viele|anzahl|zähl|count)\s+.*?(?:dateien|files|dokumente|mails|eml|pdf|docx|msg)',
+         "ZÄHLE die Dateien auf dem Dateisystem"),
+        # Listing files by type
+        (r'(?:liste|zeige|finde|suche)\s+(?:alle|sämtliche)\s+.*?(?:\.?\w{2,4})\s*(?:dateien|files)',
+         "LISTE die Dateien vom Dateisystem auf"),
+        # Directory browsing
+        (r'(?:welche|was für)\s+(?:dateien|ordner|verzeichnisse)',
+         "DURCHSUCHE das Dateisystem"),
+        # File type queries  
+        (r'(?:gibt\s*es|existieren|vorhanden)\s+.*?(?:\.eml|\.pdf|\.docx|\.msg|\.xlsx)\s*(?:dateien|files)?',
+         "PRÜFE das Dateisystem"),
+        # Explicit file counting with extension
+        (r'(?:\.eml|\.pdf|\.docx|\.msg|\.xlsx|\.pptx)\s*(?:dateien|files)?\s*(?:im|in|unter|auf)',
+         "ZÄHLE die Dateien auf dem Dateisystem"),
+        # "how many files in folder X"
+        (r'(?:wie\s*viele|anzahl)\s+.*?(?:im\s+archiv|im\s+system|im\s+projektarchiv|in\s+der\s+ablage|pro\s+ordner|pro\s+unterordner)',
+         "ZÄHLE auf dem Dateisystem"),
+    ]
+    
+    for pattern, hint in fs_patterns:
+        if re.search(pattern, query_lower):
+            return hint
+    
+    return None
+
+
+FILESYSTEM_CODE_INSTRUCTION = """
+WICHTIG: Diese Frage erfordert eine Dateisystem-Analyse. Die Suchresultate zeigen nur EINIGE Treffer, NICHT alle Dateien!
+Du MUSST einen ```python Code-Block schreiben, der das Dateisystem unter DATA_ROOT='/data' durchsucht.
+
+Beispiel für Dateien zählen:
+```python
+import os
+from collections import Counter
+counts = Counter()
+total = 0
+for root, dirs, files in os.walk(DATA_ROOT):
+    for f in files:
+        if f.lower().endswith('.eml'):  # Anpassen je nach Frage
+            rel = os.path.relpath(root, DATA_ROOT)
+            counts[rel] += 1
+            total += 1
+print(f"Gesamt: {total} Dateien")
+for folder, n in counts.most_common(10):
+    print(f"  {folder}: {n}")
+result = f"{total} Dateien gefunden"
+```
+
+Antworte NICHT basierend auf den Suchresultaten - nutze IMMER Python-Code für Dateisystem-Fragen!
+"""

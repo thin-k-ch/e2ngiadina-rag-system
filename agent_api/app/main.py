@@ -571,7 +571,16 @@ Aufgabe: {user_text}"""
                 
                 # Detect thinking mode from model name suffix
                 enable_thinking = "-think" in model.lower() or ":think" in model.lower()
-                print(f"🧠 Model='{model}', selected='{selected_model}', thinking={enable_thinking}, history={len(chat_history)} msgs")
+                
+                # Detect filesystem queries (counting/listing files) → inject code-execution instruction
+                from .code_executor import detect_filesystem_query, FILESYSTEM_CODE_INSTRUCTION
+                fs_hint = detect_filesystem_query(user_text)
+                code_instruction = ""
+                if fs_hint:
+                    code_instruction = FILESYSTEM_CODE_INSTRUCTION
+                    print(f"📂 Filesystem query detected: {fs_hint}")
+                
+                print(f"🧠 Model='{model}', selected='{selected_model}', thinking={enable_thinking}, history={len(chat_history)} msgs, fs_query={fs_hint is not None}")
                 
                 from .rag_pipeline import create_pipeline
                 pipeline = create_pipeline("simple", model=selected_model)
@@ -579,7 +588,7 @@ Aufgabe: {user_text}"""
                 answer_parts = []
                 sources = []
                 
-                async for event in pipeline.run(user_text, "", "", config=run_config, thinking=enable_thinking, chat_history=chat_history, prev_doc_context=prev_doc_context):
+                async for event in pipeline.run(user_text, "", "", config=run_config, thinking=enable_thinking, chat_history=chat_history, prev_doc_context=prev_doc_context, code_instruction=code_instruction):
                     if event.type == "token":
                         content = event.data.get("content", "")
                         answer_parts.append(content)

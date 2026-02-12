@@ -225,7 +225,8 @@ class RAGPipeline(ABC):
         stream: bool = True,
         temperature: float = None,
         thinking: bool = False,
-        chat_history: list = None
+        chat_history: list = None,
+        code_instruction: str = ""
     ) -> AsyncGenerator[Event, None]:
         """
         Generate answer from query + context.
@@ -259,6 +260,9 @@ Der Code hat Zugriff auf: pandas (pd), tabulate, csv, os, json.
 Dateien liegen unter DATA_ROOT (='/data', entspricht dem Projektarchiv).
 Nutze print() für Ausgaben. Setze result='...' für das Hauptergebnis.
 """
+        # Inject filesystem code instruction if detected
+        if code_instruction:
+            base_prompt += code_instruction
 
         if thinking:
             # TWO-CALL THINKING MODE:
@@ -390,7 +394,7 @@ class SimpleRAGPipeline(RAGPipeline):
     Simple, fast, robust. No document-level analysis.
     """
     
-    async def run(self, query: str, summary: str = "", notes: str = "", config: dict = None, thinking: bool = False, chat_history: list = None, prev_doc_context: str = "") -> AsyncGenerator[Event, None]:
+    async def run(self, query: str, summary: str = "", notes: str = "", config: dict = None, thinking: bool = False, chat_history: list = None, prev_doc_context: str = "", code_instruction: str = "") -> AsyncGenerator[Event, None]:
         # Apply glossary query rewrite for domain disambiguation
         from .glossary import rewrite_query
         rewritten_query, query_meta = rewrite_query(query)
@@ -468,7 +472,7 @@ class SimpleRAGPipeline(RAGPipeline):
         # Phase 3: Generate Answer (streaming, config-based temp)
         yield Event("phase_start", phase="answer")
         answer_parts = []
-        async for event in self._generate_answer(query, context, stream=True, temperature=answer_temperature, thinking=thinking, chat_history=chat_history):
+        async for event in self._generate_answer(query, context, stream=True, temperature=answer_temperature, thinking=thinking, chat_history=chat_history, code_instruction=code_instruction):
             if event.type == "token":
                 answer_parts.append(event.data.get("content", ""))
                 yield event
