@@ -371,8 +371,98 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
                 summary = session.get("summary", "")
                 notes = session.get("notes", "")
                 
+                # Check if user references multiple previous sources: "diesen Dokumenten", "den Quellen"
+                from .source_analyzer import detect_source_reference, detect_multi_source_reference, fetch_document_text
+                multi_ref = detect_multi_source_reference(user_text)
+                
+                if multi_ref is not None:
+                    # Load previous sources
+                    last_session = store.load("last_sources")
+                    prev_sources = last_session.get("sources", [])
+                    
+                    if prev_sources:
+                        # Build conversation history for context
+                        chat_history = []
+                        for m in req.messages[:-1]:
+                            if m.role in ("user", "assistant") and m.content:
+                                content = m.content[:2000] if len(m.content) > 2000 else m.content
+                                chat_history.append({"role": m.role, "content": content})
+                        chat_history = chat_history[-6:]
+                        
+                        # Fetch full text for each previous source (max 5)
+                        max_docs = min(len(prev_sources), 5)
+                        doc_texts = []
+                        loaded_sources = []
+                        source_names = []
+                        
+                        yield _sse_chunk(rid, created, model, {"content": f"📄 Lade {max_docs} Dokumente für Detailanalyse...\n\n"})
+                        
+                        for i, src in enumerate(prev_sources[:max_docs], 1):
+                            src_path = src.get("path", "")
+                            src_display = src.get("display_path", src_path)
+                            doc_text, _ = await fetch_document_text(src_path)
+                            if doc_text:
+                                # Truncate per document
+                                max_per_doc = 8000
+                                if len(doc_text) > max_per_doc:
+                                    doc_text = doc_text[:max_per_doc] + f"\n[... gekürzt, {len(doc_text)} Zeichen total]"
+                                doc_texts.append(f"[{i}] {src_display}:\n{doc_text}")
+                                loaded_sources.append(src)
+                                source_names.append(f"[{i}] {src_display}")
+                        
+                        if doc_texts:
+                            print(f"📄 Multi-source analysis: {len(doc_texts)} docs loaded")
+                            
+                            combined_context = "\n\n---\n\n".join(doc_texts)
+                            
+                            system_prompt = """DU BIST EIN DOKUMENTEN-ANALYSE-SYSTEM FÜR SCHWEIZER EISENBAHN-PROJEKTE (SBB TFK 2020).
+
+REGELN:
+1. Antworte IMMER auf Deutsch
+2. Analysiere ALLE bereitgestellten Dokumente VOLLSTÄNDIG und GRÜNDLICH
+3. Zitiere jede Aussage mit [N] (Dokumentnummer)
+4. Sei EXHAUSTIV - liste ALLE gefundenen Einträge auf, nicht nur die ersten paar
+5. Nutze Tabellen, Aufzählungen und Überschriften für Übersichtlichkeit
+6. Erfinde nichts - nur was in den Dokumenten steht"""
+
+                            user_msg = f"""Hier sind die Dokumente:
+
+{combined_context}
+
+Aufgabe: {user_text}"""
+
+                            messages = [
+                                {"role": "system", "content": system_prompt},
+                            ]
+                            if chat_history:
+                                messages.extend(chat_history)
+                            messages.append({"role": "user", "content": user_msg})
+                            
+                            from .rag_pipeline import SimpleRAGPipeline
+                            pipeline = SimpleRAGPipeline(model=selected_model)
+                            
+                            async for chunk in pipeline._llm_stream(messages):
+                                yield _sse_chunk(rid, created, model, {"content": chunk})
+                            
+                            # Add source links
+                            from urllib.parse import quote
+                            source_lines = []
+                            for j, src in enumerate(loaded_sources, 1):
+                                dp = src.get("display_path", src.get("path", ""))
+                                url = src.get("local_url", "")
+                                if url:
+                                    source_lines.append(f"[{j}] [{dp}]({url})")
+                                else:
+                                    source_lines.append(f"[{j}] {dp}")
+                            yield _sse_chunk(rid, created, model, {"content": "\n\nQuellen:\n" + "\n".join(source_lines)})
+                        else:
+                            yield _sse_chunk(rid, created, model, {"content": "⚠️ Dokumentinhalte konnten nicht aus ES geladen werden.\n"})
+                        
+                        yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")
+                        yield "data: [DONE]\n\n"
+                        return
+                
                 # Check if user references a previous source: "Analysiere Quelle [1]"
-                from .source_analyzer import detect_source_reference, fetch_document_text
                 source_ref = detect_source_reference(user_text)
                 
                 if source_ref is not None:

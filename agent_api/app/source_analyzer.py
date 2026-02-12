@@ -21,6 +21,34 @@ SOURCE_REF_PATTERNS = [
 ]
 
 
+def detect_multi_source_reference(query: str) -> Optional[str]:
+    """
+    Detect if user query references multiple previous sources or 'these documents'.
+    Returns 'all' for generic references, or None if no multi-source reference detected.
+    
+    Patterns:
+    - "diesen Dokumenten", "den Quellen", "diesen Quellen"
+    - "Quellen 1-3", "Quellen 1,2,3", "Quellen 1 bis 3"  
+    - "allen Dokumenten", "allen Quellen"
+    - "obigen Dokumenten", "oben genannten"
+    """
+    query_lower = query.lower().strip()
+    
+    # Generic references to previous documents
+    generic_patterns = [
+        r'(?:diesen|den|obigen|genannten|oben\s+genannten|vorherigen|erwähnten)\s+(?:dokumenten?|quellen?|dateien?|unterlagen?)',
+        r'(?:allen?)\s+(?:dokumenten?|quellen?|dateien?)',
+        r'(?:in|aus|von)\s+(?:diesen|den)\s+(?:dokumenten?|quellen?|dateien?)',
+        r'(?:dokumente[n]?|quellen?)\s+(?:oben|zuvor|vorher)',
+    ]
+    
+    for pattern in generic_patterns:
+        if re.search(pattern, query_lower):
+            return "all"
+    
+    return None
+
+
 def detect_source_reference(query: str) -> Optional[int]:
     """
     Detect if user query references a source number like [1], [2], etc.
