@@ -534,6 +534,7 @@ Aufgabe: {user_text}"""
                 from .transcript_processor import (
                     detect_transcript_mode, extract_file_reference,
                     separate_instruction_and_transcript, load_transcript_file,
+                    preprocess_transcript,
                     PROTOCOL_SYSTEM_PROMPT, PROTOCOL_USER_TEMPLATE
                 )
                 transcript_mode = detect_transcript_mode(user_text)
@@ -556,10 +557,12 @@ Aufgabe: {user_text}"""
                             yield "data: [DONE]\n\n"
                             return
                         instruction = user_text  # The whole message is the instruction
+                        transcript_text = preprocess_transcript(transcript_text)
                         print(f"📂 Loaded transcript file: {file_ref} ({len(transcript_text)} chars)")
                     else:
                         # Text is inline - separate instruction from transcript
                         instruction, transcript_text = separate_instruction_and_transcript(user_text)
+                        transcript_text = preprocess_transcript(transcript_text)
                         if not instruction:
                             instruction = "Erstelle ein vollständiges Protokoll mit Pendenzenliste."
                         print(f"📝 Inline transcript: {len(transcript_text)} chars, instruction: {instruction[:80]}...")
@@ -580,7 +583,7 @@ Aufgabe: {user_text}"""
                     from .rag_pipeline import SimpleRAGPipeline
                     pipeline = SimpleRAGPipeline(model=selected_model)
                     
-                    async for chunk in pipeline._llm_stream(messages):
+                    async for chunk in pipeline._llm_stream(messages, num_predict=16384):
                         yield _sse_chunk(rid, created, model, {"content": chunk})
                     
                     yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")

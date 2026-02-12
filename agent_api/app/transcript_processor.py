@@ -132,6 +132,83 @@ def separate_instruction_and_transcript(user_text: str) -> Tuple[str, str]:
     return "", user_text
 
 
+def preprocess_transcript(text: str) -> str:
+    """
+    Pre-process a Whisper transcript:
+    1. Parse user-provided header mappings (e.g., 'SPEAKER_00: Felix')
+    2. Apply domain-specific auto-corrections (common Whisper errors)
+    3. Strip the header section if present
+    
+    Header format (optional, added manually by user):
+        SPEAKER_00: Felix
+        SPEAKER_01: Stefano
+        Adnova: Atnova
+        
+        SPEAKER_00 [0.00-5.02]:
+        Actual transcript starts here...
+    """
+    lines = text.split('\n')
+    header_replacements = {}
+    header_end = 0
+    
+    # Parse header: lines matching "KEY: Value" pattern (no timestamps)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            if header_replacements:
+                header_end = i + 1
+                continue
+            continue
+        
+        # Must NOT look like transcript content (timestamps = [0.00-5.02])
+        if re.search(r'\[\d+\.\d+', stripped):
+            break
+        
+        mapping_match = re.match(r'^([A-Z_]+(?:_\d+)?|[A-Za-zÄÖÜäöü\-]+)\s*:\s*(.+)$', stripped)
+        if mapping_match:
+            key = mapping_match.group(1).strip()
+            value = mapping_match.group(2).strip()
+            if len(value) > 80:
+                break
+            header_replacements[key] = value
+            header_end = i + 1
+        else:
+            if header_replacements:
+                break
+    
+    # Strip header if found
+    if header_replacements:
+        text = '\n'.join(lines[header_end:]).strip()
+        sorted_keys = sorted(header_replacements.keys(), key=len, reverse=True)
+        for key in sorted_keys:
+            value = header_replacements[key]
+            if key != value:
+                text = text.replace(key, value)
+        applied = [f"{k} → {v}" for k, v in header_replacements.items() if k != v]
+        if applied:
+            print(f"📝 Header replacements: {', '.join(applied[:10])}")
+    
+    # Domain-specific auto-corrections (common Whisper recognition errors)
+    # These are project-specific terms that Whisper consistently misrecognizes
+    auto_corrections = {
+        "Adnova": "Atnova",
+        "Reticum": "Rhäticom",
+        "Eppenberg": "Dettenberg",
+        "Clawbot": "Clawbot",      # keep as-is if correct
+    }
+    
+    auto_applied = []
+    for wrong, correct in auto_corrections.items():
+        if wrong != correct and wrong in text:
+            text = text.replace(wrong, correct)
+            auto_applied.append(f"{wrong} → {correct}")
+    
+    if auto_applied:
+        print(f"📝 Auto-corrections: {', '.join(auto_applied)}")
+    
+    return text
+
+
 PROTOCOL_SYSTEM_PROMPT = """DU BIST EIN PROFESSIONELLER PROTOKOLL-ERSTELLER.
 
 Deine Aufgabe ist es, aus dem bereitgestellten Text (Transkript, Mitschrift, Gesprächsaufzeichnung) 

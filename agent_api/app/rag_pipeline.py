@@ -339,18 +339,50 @@ Sei gründlich aber knapp. Antworte auf Deutsch."""
                 answer = await self._llm_complete(messages, temperature=temp)
                 yield Event("complete", answer=answer)
     
-    async def _llm_stream(self, messages: List[Dict[str, str]], temperature: float = None) -> AsyncGenerator[str, None]:
-        """Stream LLM response with optional temperature override"""
+    async def _llm_stream(self, messages: List[Dict[str, str]], temperature: float = None, num_predict: int = None) -> AsyncGenerator[str, None]:
+        """Stream LLM response with dynamic context window sizing.
+        
+        Automatically calculates num_ctx based on input token estimate
+        to prevent Ollama from truncating long inputs (e.g. transcripts).
+        """
+        # Estimate input tokens (rough: ~4 chars per token for German/mixed text)
+        total_chars = sum(len(m.get("content", "")) for m in messages)
+        est_input_tokens = total_chars // 3  # conservative estimate
+        
+        # Dynamic context window: input tokens + output buffer + safety margin
+        output_buffer = num_predict or 8192
+        min_ctx = 4096
+        needed_ctx = est_input_tokens + output_buffer + 512
+        num_ctx = max(min_ctx, needed_ctx)
+        
+        # Cap at reasonable limits per model
+        max_ctx = 131072  # 128K - safe for most models
+        num_ctx = min(num_ctx, max_ctx)
+        
+        options = {"num_ctx": num_ctx}
+        if temperature is not None:
+            options["temperature"] = temperature
+        if num_predict:
+            options["num_predict"] = num_predict
+        
         payload = {
             "model": self.model,
             "messages": messages,
-            "stream": True
+            "stream": True,
+            "options": options
         }
-        if temperature is not None:
-            payload["options"] = {"temperature": temperature}
+        
+        # Dynamic timeout: longer for bigger inputs
+        base_timeout = 120.0
+        if total_chars > 20000:
+            base_timeout = 600.0  # 10 min for long transcripts
+        elif total_chars > 5000:
+            base_timeout = 300.0  # 5 min for medium inputs
+        
+        print(f"🔧 LLM stream: {total_chars} chars ≈ {est_input_tokens} tokens, num_ctx={num_ctx}, timeout={base_timeout}s, model={self.model}")
         
         import httpx
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(base_timeout, connect=10.0)) as client:
             async with client.stream(
                 "POST",
                 f"{self.ollama_base}/api/chat",
@@ -369,16 +401,30 @@ Sei gründlich aber knapp. Antworte auf Deutsch."""
                         pass
     
     async def _llm_complete(self, messages: List[Dict[str, str]], temperature: float = None) -> str:
-        """Non-streaming LLM call with optional temperature override"""
+        """Non-streaming LLM call with dynamic context window sizing"""
+        total_chars = sum(len(m.get("content", "")) for m in messages)
+        est_input_tokens = total_chars // 3
+        num_ctx = max(4096, est_input_tokens + 8192 + 512)
+        num_ctx = min(num_ctx, 131072)
+        
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": temperature if temperature is not None else RAG_ANSWER_TEMPERATURE}
+            "options": {
+                "temperature": temperature if temperature is not None else RAG_ANSWER_TEMPERATURE,
+                "num_ctx": num_ctx
+            }
         }
         
+        base_timeout = 60.0
+        if total_chars > 20000:
+            base_timeout = 300.0
+        elif total_chars > 5000:
+            base_timeout = 120.0
+        
         import httpx
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(base_timeout, connect=10.0)) as client:
             r = await client.post(f"{self.ollama_base}/api/chat", json=payload)
             r.raise_for_status()
             data = r.json()
