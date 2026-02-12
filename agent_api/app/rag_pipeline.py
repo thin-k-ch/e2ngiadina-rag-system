@@ -358,13 +358,23 @@ class SimpleRAGPipeline(RAGPipeline):
                 answer_parts.append(event.data.get("content", ""))
                 yield event
             elif event.type == "complete":
-                # Build sources from RANKED hits (config-based)
+                # Build sources from RANKED hits (config-based) with clickable URLs
+                file_base = os.getenv("FILE_BASE", "/media/felix/RAG/1")
                 sources = []
                 for i, hit in enumerate(ranked_hits[:max_sources], 1):
+                    path = hit.get("path", hit.get("file", {}).get("path", ""))
+                    display_path = path.replace("/media/felix/RAG/1", "")
+                    
+                    # Build HTTP URL for opening file (always prepend file_base)
+                    from urllib.parse import quote
+                    full_path = os.path.join(file_base, path.lstrip("/"))
+                    url = f"http://localhost:11436/open?path={quote(full_path)}"
+                    
                     sources.append({
                         "n": i,
-                        "path": hit.get("path", hit.get("file", {}).get("path", "")),
-                        "display_path": hit.get("path", "").replace("/media/felix/RAG/1", ""),
+                        "path": path,
+                        "display_path": display_path,
+                        "local_url": url,
                         "score": hit.get("score", 0)
                     })
                 

@@ -279,6 +279,19 @@ async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = Non
         
         answer = "".join(answer_parts) if answer_parts else "Keine Antwort generiert."
         
+        # Add sources directly to answer content as markdown links
+        if sources:
+            lines = ["", "", "Quellen:"]
+            for s in sources:
+                n = s.get("n", "?")
+                dp = s.get("display_path", s.get("path", ""))
+                url = s.get("local_url", "")
+                if url:
+                    lines.append(f"[{n}] [{dp}]({url})")
+                else:
+                    lines.append(f"[{n}] {dp}")
+            answer += "\n" + "\n".join(lines)
+        
         # Build sources for response
         formatted_sources = []
         for s in sources:
@@ -371,12 +384,19 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
                     elif event.type == "complete":
                         sources = event.data.get("sources", [])
                 
-                # Add sources at end
+                # Add sources at end with clickable links
                 if sources:
-                    source_text = "\n\n📚 Quellen:\n" + "\n".join(
-                        f"[{s.get('n', '?')}] {s.get('display_path', s.get('path', ''))}"
-                        for s in sources
-                    )
+                    from urllib.parse import quote
+                    source_lines = []
+                    for s in sources:
+                        n = s.get('n', '?')
+                        dp = s.get('display_path', s.get('path', ''))
+                        url = s.get('local_url', '')
+                        if url:
+                            source_lines.append(f"[{n}] [{dp}]({url})")
+                        else:
+                            source_lines.append(f"[{n}] {dp}")
+                    source_text = "\n\nQuellen:\n" + "\n".join(source_lines)
                     yield _sse_chunk(rid, created, model, {"content": source_text})
                 
                 # End marker

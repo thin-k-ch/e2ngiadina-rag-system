@@ -159,8 +159,15 @@ def _build_sources(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             
         display_path = path
         url = ""
+        file_url = ""  # file:// URL for local opening
+        
+        # DEBUG
+        import sys
+        sys.stderr.write(f"[DEBUG] Processing path: {path}, file_base: {file_base}\n")
+        
         if make_clickable_path:
             display_path, url = make_clickable_path(path, file_base=file_base, use_http_proxy=True)
+            sys.stderr.write(f"[DEBUG] make_clickable_path returned: {url}\n")
         else:
             # fallback: still try to use /open endpoint with URL encoding
             try:
@@ -169,14 +176,30 @@ def _build_sources(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 if file_base and not path.startswith("/"):
                     full_path = os.path.join(file_base, path)
                 url = f"http://localhost:11436/open?path={quote(full_path)}"
-            except Exception:
+                sys.stderr.write(f"[DEBUG] Fallback URL: {url}\n")
+            except Exception as e:
+                sys.stderr.write(f"[DEBUG] URL generation error: {e}\n")
                 url = ""
+        
+        # Create file:// URL for local file opening
+        try:
+            from urllib.parse import quote
+            full_path = path
+            if file_base and not path.startswith("/"):
+                full_path = os.path.join(file_base, path)
+            # Ensure absolute path for file:// URL
+            if not full_path.startswith("/"):
+                full_path = "/" + full_path
+            file_url = f"file://{quote(full_path)}"
+        except Exception:
+            file_url = ""
         
         sources.append({
             "n": n,
             "path": path,
             "display_path": display_path,
             "local_url": url,
+            "file_url": file_url,  # file:// URL for clicking
             "score": score,
             "snippet": snippet,
             "file": file_info,
@@ -422,20 +445,24 @@ class Agent:
         if not context:
             return "Keine Dokumente gefunden.", summary, notes, sources
         
-        # Quick summary of findings without LLM
+        # Quick summary of findings with clickable links
         answer_lines = ["Gefundene Dokumente:"]
         for i, s in enumerate(sources[:5], 1):
             path = s.get('display_path', s.get('path', ''))
-            answer_lines.append(f"[{i}] {path}")
+            url = s.get('local_url', '')
+            if url:
+                answer_lines.append(f"[{i}] [{path}]({url})")
+            else:
+                answer_lines.append(f"[{i}] {path}")
         
         out = "\n".join(answer_lines)
 
-        # Append sources markdown
+        # Append sources markdown with HTTP links (file:// blocked by browsers)
         if sources:
-            lines = ["", "Quellen (lokal):"]
+            lines = ["", "Quellen:"]
             for s in sources:
                 dp = s.get("display_path", s.get("path", ""))
-                url = s.get("local_url", "")
+                url = s.get("local_url", "")  # HTTP URL to /open endpoint
                 n = s.get("n", "?")
                 if url:
                     lines.append(f"[{n}] [{dp}]({url})")
@@ -509,12 +536,12 @@ class Agent:
         except Exception as e:
             yield {"type": "token", "content": f"\nFehler beim Streaming: {_safe_str(e)}\n"}
 
-        # 5) Append sources
+        # 5) Append sources with HTTP links (browser-compatible)
         if sources:
-            lines = ["", "\nQuellen (lokal):"]
+            lines = ["", "\nQuellen:"]
             for s in sources:
                 dp = s.get("display_path", s.get("path", ""))
-                url = s.get("local_url", "")
+                url = s.get("local_url", "")  # HTTP URL
                 n = s.get("n", "?")
                 if url:
                     lines.append(f"[{n}] [{dp}]({url})")
