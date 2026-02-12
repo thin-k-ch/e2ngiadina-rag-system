@@ -143,12 +143,31 @@ class RAGPipeline(ABC):
         excel_penalty_irrel = cfg.get("excel_penalty_irrelevant", RAG_EXCEL_PENALTY_IRRELEVANT)
         pdf_msg_bonus = cfg.get("pdf_msg_bonus", RAG_PDF_MSG_BONUS)
         
+        # Extract query terms for relevance boosting (primary signal)
+        query_terms = [t.strip().lower() for t in query_lower.split() if len(t.strip()) >= 3]
+        
         def relevance_score(hit):
             path = hit.get("path", "").lower()
             snippet = hit.get("snippet", "").lower()
             base_score = hit.get("score", 0)
             
             boost = 0
+            
+            # PRIMARY: Query term matching (strongest signal)
+            query_match_count = 0
+            for qt in query_terms:
+                if qt in path:
+                    boost += 20  # Strong boost for query term in path
+                    query_match_count += 1
+                if qt in snippet:
+                    boost += 10  # Good boost for query term in snippet
+                    query_match_count += 1
+            
+            # Bonus for multiple query terms matching
+            if query_match_count >= 2:
+                boost += 15
+            
+            # SECONDARY: Domain keyword matching (weaker signal)
             keyword_count = 0
             for kw in keywords:
                 if kw in path:
@@ -158,27 +177,26 @@ class RAGPipeline(ABC):
                     boost += snippet_boost
                     keyword_count += 1
             
-            # Extra boost for multiple keywords (compound match)
             if keyword_count >= 2:
                 boost += compound_bonus
             
-            # PENALTY: Excel files get lower priority - BUT less penalty if path contains relevant keywords
+            # PENALTY: Excel files
             if path.endswith(('.xlsx', '.xls')):
-                # Check if Excel filename contains relevant keywords
                 excel_relevant = any(kw in path for kw in RAG_EXCEL_RELEVANT_KEYWORDS)
-                if excel_relevant:
-                    boost += excel_penalty_rel
-                else:
-                    boost += excel_penalty_irrel
+                boost += excel_penalty_rel if excel_relevant else excel_penalty_irrel
             
-            # BONUS: PDF/MSG documents preferred for real content
+            # BONUS: PDF/MSG/DOCX preferred
             if path.endswith(('.pdf', '.msg', '.docx')):
                 boost += pdf_msg_bonus
                 
             return base_score + boost
         
+        # Compute and store scores
+        for hit in hits:
+            hit["relevance_score"] = relevance_score(hit)
+        
         # Sort by boosted relevance
-        sorted_hits = sorted(hits, key=relevance_score, reverse=True)
+        sorted_hits = sorted(hits, key=lambda h: h["relevance_score"], reverse=True)
         return sorted_hits
     
     def _build_context(self, hits: List[Dict[str, Any]], max_docs: int = 15) -> str:
@@ -354,15 +372,41 @@ class SimpleRAGPipeline(RAGPipeline):
                 answer_parts.append(event.data.get("content", ""))
                 yield event
             elif event.type == "complete":
-                # Build sources from RANKED hits (config-based) with clickable URLs
+                # Build sources from RANKED hits with dynamic relevance cutoff
                 file_base = os.getenv("FILE_BASE", "/media/felix/RAG/1")
+                from urllib.parse import quote
+                
+                # Dynamic source filtering - two tiers:
+                # Tier 1: Query terms in PATH (document is about the topic) → all shown
+                # Tier 2: Query terms only in snippet (mentions topic) → max 5
+                query_terms = [t.strip().lower() for t in query.lower().split() if len(t.strip()) >= 3]
+                max_snippet_only = 5  # Max sources that only match in snippet
+                
+                tier1 = []  # Path matches
+                tier2 = []  # Snippet-only matches
+                
+                for hit in ranked_hits:
+                    path = hit.get("path", hit.get("file", {}).get("path", ""))
+                    snippet = hit.get("snippet", "")
+                    path_lower = path.lower()
+                    snippet_lower = snippet.lower()
+                    
+                    in_path = any(qt in path_lower for qt in query_terms) if query_terms else False
+                    in_snippet = any(qt in snippet_lower for qt in query_terms) if query_terms else True
+                    
+                    if in_path:
+                        tier1.append(hit)
+                    elif in_snippet:
+                        tier2.append(hit)
+                
+                # Combine: all path matches + limited snippet matches
+                relevant_hits = tier1 + tier2[:max_snippet_only]
+                relevant_hits = relevant_hits[:max_sources]
+                
                 sources = []
-                for i, hit in enumerate(ranked_hits[:max_sources], 1):
+                for i, hit in enumerate(relevant_hits, 1):
                     path = hit.get("path", hit.get("file", {}).get("path", ""))
                     display_path = path.replace("/media/felix/RAG/1", "")
-                    
-                    # Build HTTP URL for opening file (always prepend file_base)
-                    from urllib.parse import quote
                     full_path = os.path.join(file_base, path.lstrip("/"))
                     url = f"http://localhost:11436/open?path={quote(full_path)}"
                     
@@ -371,8 +415,10 @@ class SimpleRAGPipeline(RAGPipeline):
                         "path": path,
                         "display_path": display_path,
                         "local_url": url,
-                        "score": hit.get("score", 0)
+                        "score": round(hit.get("relevance_score", 0), 4)
                     })
+                
+                print(f"📊 Sources: {len(sources)} (path={len(tier1)}, snippet={len(tier2[:max_snippet_only])}) von {len(ranked_hits)} total")
                 
                 yield Event("complete", 
                           answer=event.data.get("answer", "").join(answer_parts),
