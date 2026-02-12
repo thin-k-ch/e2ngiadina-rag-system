@@ -49,7 +49,7 @@ class StateStore:
         except Exception:
             return {"summary": "", "notes": "", "updated_at": _now()}
 
-    def save(self, conv_id: str, summary: str, notes: str) -> None:
+    def save(self, conv_id: str, summary: str, notes: str, sources: list = None) -> None:
         p = self._path(conv_id)
         tmp = p + ".tmp"
         data = {
@@ -57,6 +57,13 @@ class StateStore:
             "notes": notes or "",
             "updated_at": _now(),
         }
+        if sources is not None:
+            data["sources"] = sources
+        else:
+            # Preserve existing sources
+            existing = self.load(conv_id)
+            if existing.get("sources"):
+                data["sources"] = existing["sources"]
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, p)

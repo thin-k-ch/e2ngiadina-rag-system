@@ -362,6 +362,81 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
                 # MVP: SimpleRAG with selected model (strip rag- prefix)
                 selected_model = model.replace("rag-", "", 1) if model.startswith("rag-") else (model or "llama4:latest")
                 
+                # Resolve conversation ID for session state
+                conv_id = x_conversation_id or hashlib.md5(user_text.encode()).hexdigest()[:12]
+                session = store.load(conv_id)
+                summary = session.get("summary", "")
+                notes = session.get("notes", "")
+                
+                # Check if user references a previous source: "Analysiere Quelle [1]"
+                from .source_analyzer import detect_source_reference, fetch_document_text
+                source_ref = detect_source_reference(user_text)
+                
+                if source_ref is not None:
+                    # Load previous sources from global last_sources
+                    last_session = store.load("last_sources")
+                    prev_sources = last_session.get("sources", [])
+                    
+                    if prev_sources and 1 <= source_ref <= len(prev_sources):
+                        ref_source = prev_sources[source_ref - 1]
+                        ref_path = ref_source.get("path", "")
+                        ref_display = ref_source.get("display_path", ref_path)
+                        
+                        yield _sse_chunk(rid, created, model, {"content": f"📄 Analysiere Dokument: **{ref_display}**\n\n"})
+                        
+                        # Fetch full text from ES
+                        doc_text, doc_meta = await fetch_document_text(ref_path)
+                        
+                        if not doc_text:
+                            yield _sse_chunk(rid, created, model, {"content": "⚠️ Dokumentinhalt konnte nicht aus ES geladen werden.\n"})
+                        else:
+                            # Truncate if too long for LLM context
+                            max_chars = 12000
+                            if len(doc_text) > max_chars:
+                                doc_text = doc_text[:max_chars] + f"\n\n[... gekürzt, {len(doc_text)} Zeichen total]"
+                            
+                            # Stream LLM analysis
+                            from .rag_pipeline import SimpleRAGPipeline
+                            pipeline = SimpleRAGPipeline(model=selected_model)
+                            
+                            system_prompt = """DU BIST EIN DOKUMENTEN-ANALYSE-SYSTEM FÜR SCHWEIZER EISENBAHN-PROJEKTE (SBB TFK 2020).
+
+REGELN:
+1. Antworte IMMER auf Deutsch
+2. Fasse den Dokumentinhalt strukturiert und vollständig zusammen
+3. Hebe wichtige Fakten, Daten, Personen und Entscheidungen hervor
+4. Nutze Aufzählungen und Überschriften für Übersichtlichkeit
+5. Sei präzise und faktenbasiert - erfinde nichts"""
+
+                            user_msg = f"""Hier ist das Dokument "{ref_display}":
+
+{doc_text}
+
+Aufgabe: {user_text}"""
+
+                            messages = [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_msg}
+                            ]
+                            
+                            async for chunk in pipeline._llm_stream(messages):
+                                yield _sse_chunk(rid, created, model, {"content": chunk})
+                            
+                            # Add source link at end
+                            from urllib.parse import quote
+                            url = ref_source.get("local_url", "")
+                            yield _sse_chunk(rid, created, model, {"content": f"\n\nQuelle: [{ref_display}]({url})"})
+                        
+                        yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")
+                        yield "data: [DONE]\n\n"
+                        return
+                    else:
+                        yield _sse_chunk(rid, created, model, {"content": f"⚠️ Quelle [{source_ref}] nicht gefunden. Bitte zuerst eine Suche durchführen.\n"})
+                        yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")
+                        yield "data: [DONE]\n\n"
+                        return
+                
+                # Normal RAG flow
                 # Build per-request config from rag_config if provided
                 run_config = {}
                 if hasattr(req, 'rag_config') and req.rag_config:
@@ -398,6 +473,11 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
                             source_lines.append(f"[{n}] {dp}")
                     source_text = "\n\nQuellen:\n" + "\n".join(source_lines)
                     yield _sse_chunk(rid, created, model, {"content": source_text})
+                
+                # Save sources globally for "Analysiere Quelle [N]" feature
+                store.save(conv_id, summary, notes)
+                if sources:
+                    store.save("last_sources", "", "", sources=sources)
                 
                 # End marker
                 yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")

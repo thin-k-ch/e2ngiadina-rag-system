@@ -215,41 +215,43 @@ class RAGPipeline(ABC):
         """
         temp = temperature if temperature is not None else RAG_ANSWER_TEMPERATURE
         
-        # Pre-process query to add context for problematic terms
-        query_context = query
-        if "fat" in query.lower():
-            query_context = f"{query} (FAT = Factory Acceptance Test / Werksabnahme im Bahnbereich, NICHT Fettleber)"
-        
-        system_prompt = """DU BIST EIN DOKUMENTEN-ANALYSE-SYSTEM FÜR SCHWEIZER EISENBAHN-PROJEKTE (SBB TFK 2020).
+        system_prompt = """DU BIST EIN RAG-AGENT FÜR SCHWEIZER EISENBAHN-PROJEKTE (SBB TFK 2020 - Tunnelfunk).
 
-=== DOMAIN DEFINITIONS (MUST RESPECT) ===
-- FAT = Factory Acceptance Test = Werksabnahme-Test für Bahntechnik
-- SAT = Site Acceptance Test = Abnahme vor Ort
-- Befund = Technische Abnahme-Feststellung/Mangel
-- Dies ist eine TECHNISCHE DOKUMENTENANALYSE, keine medizinische!
+=== KONTEXT ===
+Du analysierst Projektdokumente aus den Bereichen Projektleitung, Programmleitung,
+Funktechnik und Tunnelfunk. Dokumente sind mehrheitlich auf Deutsch, teilweise Englisch.
 
-=== USER QUERY ===
-""" + query_context + """
+=== FACHBEGRIFFE ===
+- FAT = Factory Acceptance Test (Werksabnahme), NICHT medizinisch
+- SAT = Site Acceptance Test (Abnahme vor Ort)
+- TFK = Tunnelfunk
+- GBT = Gotthard Basistunnel
+- RBT = Rhomberg Bahntechnik
 
-=== DOCUMENT CONTEXT ===
-""" + str(context or "Keine Dokumente gefunden.") + """
+=== ANTWORT-REGELN ===
+1. Antworte IMMER auf Deutsch
+2. Starte DIREKT mit den Fakten - keine Einleitungen
+3. Zitiere Fakten mit [N] Quellenreferenz
+4. Sei präzise, faktenbasiert und vollständig
+5. Nutze Aufzählungen und Überschriften für Struktur
 
-=== TASK ===
-Extrahiere FACTS zu "FAT Befunde" aus den Dokumenten oben.
-FAT = Factory Acceptance Test (Bahntechnik), niemals Fettleber!
+=== VERBOTEN ===
+- "Ich habe die Dokumente durchsucht..."
+- "Hier sind die Ergebnisse..."
+- "Es scheint, dass..."
+- Spekulation oder Vermutungen
+- Allgemeine Einleitungen
 
-=== RULES ===
-1. Cite every fact with [number]
-2. List specific findings from acceptance protocols
-3. No speculation with "seems", "might", "possibly"
-4. If no FAT findings: Say "No FAT findings in context"
-
-THIS IS RAILWAY PROJECT DOCUMENT ANALYSIS - NOT MEDICAL!"""
+=== WENN KEINE TREFFER ===
+Sage direkt: "Keine Dokumente zu [Suchbegriff] gefunden."
+"""
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": query}
         ]
+        if context:
+            messages.append({"role": "system", "content": f"DOKUMENT-KONTEXT:\n{context}"})
+        messages.append({"role": "user", "content": query})
         
         if stream:
             answer_parts = []
