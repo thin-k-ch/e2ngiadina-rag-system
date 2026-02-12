@@ -420,13 +420,21 @@ class SimpleRAGPipeline(RAGPipeline):
                 file_base = os.getenv("FILE_BASE", "/media/felix/RAG/1")
                 from urllib.parse import quote
                 
-                # Dynamic source filtering - two tiers:
-                # Tier 1: Query terms in PATH (document is about the topic) → all shown
-                # Tier 2: Query terms only in snippet (mentions topic) → max 5
-                query_terms = [t.strip().lower() for t in query.lower().split() if len(t.strip()) >= 3]
-                max_snippet_only = 5  # Max sources that only match in snippet
+                # Dynamic source filtering - two tiers with stop word removal:
+                # Tier 1: Multiple query terms in PATH → all shown
+                # Tier 2: Query terms only in snippet → max 3
+                stop_words = {"der", "die", "das", "den", "dem", "des", "ein", "eine", "einer",
+                              "und", "oder", "aber", "für", "mit", "von", "aus", "bei", "auf",
+                              "ist", "sind", "was", "wie", "wer", "ich", "mir", "alle", "sich",
+                              "nicht", "auch", "nach", "über", "unter", "nur", "noch", "kann",
+                              "wird", "hat", "sein", "haben", "werden", "diese", "dieser",
+                              "diesen", "diesem", "suche", "suchen", "finde", "finden",
+                              "zeige", "zeigen", "gib", "system", "abgelegt", "inhalt"}
+                query_terms = [t.strip().lower() for t in query.lower().split() 
+                              if len(t.strip()) >= 3 and t.strip().lower() not in stop_words]
+                max_snippet_only = 3
                 
-                tier1 = []  # Path matches
+                tier1 = []  # Path matches (multiple query terms)
                 tier2 = []  # Snippet-only matches
                 
                 for hit in ranked_hits:
@@ -435,12 +443,15 @@ class SimpleRAGPipeline(RAGPipeline):
                     path_lower = path.lower()
                     snippet_lower = snippet.lower()
                     
-                    in_path = any(qt in path_lower for qt in query_terms) if query_terms else False
-                    in_snippet = any(qt in snippet_lower for qt in query_terms) if query_terms else True
+                    # Count how many query terms match in path
+                    path_matches = sum(1 for qt in query_terms if qt in path_lower)
+                    snippet_matches = sum(1 for qt in query_terms if qt in snippet_lower)
                     
-                    if in_path:
+                    # Tier 1: at least 2 query terms in path, or 1 if only 1 query term
+                    min_path_matches = min(2, len(query_terms))
+                    if path_matches >= min_path_matches:
                         tier1.append(hit)
-                    elif in_snippet:
+                    elif snippet_matches >= min_path_matches:
                         tier2.append(hit)
                 
                 # Combine: all path matches + limited snippet matches
