@@ -529,6 +529,64 @@ Aufgabe: {user_text}"""
                         yield "data: [DONE]\n\n"
                         return
                 
+                # Pfad E: Transcript/Protocol Processing
+                # Detect if user wants transcript → protocol conversion (bypass RAG)
+                from .transcript_processor import (
+                    detect_transcript_mode, extract_file_reference,
+                    separate_instruction_and_transcript, load_transcript_file,
+                    PROTOCOL_SYSTEM_PROMPT, PROTOCOL_USER_TEMPLATE
+                )
+                transcript_mode = detect_transcript_mode(user_text)
+                
+                if transcript_mode:
+                    print(f"📝 Transcript mode detected: {transcript_mode}")
+                    yield _sse_chunk(rid, created, model, {"content": "📝 **Transkript-Modus:** Erstelle Protokoll...\n\n"})
+                    
+                    # Check if user references a file
+                    file_ref = extract_file_reference(user_text)
+                    transcript_text = None
+                    instruction = ""
+                    
+                    if file_ref:
+                        yield _sse_chunk(rid, created, model, {"content": f"📂 Lade Datei: `{file_ref}`...\n\n"})
+                        transcript_text = await load_transcript_file(file_ref)
+                        if not transcript_text:
+                            yield _sse_chunk(rid, created, model, {"content": f"⚠️ Datei nicht gefunden: `{file_ref}`\n\nBitte den Text direkt in den Chat einfügen.\n"})
+                            yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")
+                            yield "data: [DONE]\n\n"
+                            return
+                        instruction = user_text  # The whole message is the instruction
+                        print(f"📂 Loaded transcript file: {file_ref} ({len(transcript_text)} chars)")
+                    else:
+                        # Text is inline - separate instruction from transcript
+                        instruction, transcript_text = separate_instruction_and_transcript(user_text)
+                        if not instruction:
+                            instruction = "Erstelle ein vollständiges Protokoll mit Pendenzenliste."
+                        print(f"📝 Inline transcript: {len(transcript_text)} chars, instruction: {instruction[:80]}...")
+                    
+                    # Build messages for LLM - NO RAG search, direct processing
+                    user_msg = PROTOCOL_USER_TEMPLATE.format(
+                        instruction=instruction,
+                        transcript=transcript_text
+                    )
+                    
+                    messages = [
+                        {"role": "system", "content": PROTOCOL_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg}
+                    ]
+                    
+                    print(f"📝 Protocol generation: {len(user_msg)} chars to LLM ({selected_model})")
+                    
+                    from .rag_pipeline import SimpleRAGPipeline
+                    pipeline = SimpleRAGPipeline(model=selected_model)
+                    
+                    async for chunk in pipeline._llm_stream(messages):
+                        yield _sse_chunk(rid, created, model, {"content": chunk})
+                    
+                    yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")
+                    yield "data: [DONE]\n\n"
+                    return
+                
                 # Normal RAG flow
                 # Build per-request config from rag_config if provided
                 run_config = {}
