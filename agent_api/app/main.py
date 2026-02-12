@@ -6,6 +6,7 @@ import asyncio
 import traceback
 from fastapi import FastAPI, Header, Request, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from typing import Any
 from pydantic import BaseModel
 
 from .agent_orchestrator import Agent, AgentOrchestrator
@@ -112,7 +113,7 @@ def _format_phase_for_ui(event: dict) -> str:
 def derive_conv_id(messages, x_conversation_id: str | None) -> str:
     if x_conversation_id and x_conversation_id.strip():
         return x_conversation_id.strip()
-    joined = "\n".join([f"{m.role}:{m.content}" for m in messages])[:2000]
+    joined = "\n".join([f"{m.role}:{_normalize_content(m.content)}" for m in messages])[:2000]
     h = hashlib.sha1(joined.encode("utf-8", errors="ignore")).hexdigest()
     return f"conv_{h[:16]}"
 
@@ -122,7 +123,29 @@ def derive_conv_id(messages, x_conversation_id: str | None) -> str:
 
 class Message(BaseModel):
     role: str
-    content: str
+    content: Any  # str or list (OpenWebUI may send multimodal content)
+
+def _normalize_content(content) -> str:
+    """Normalize message content to plain string.
+    
+    OpenWebUI may send content as:
+    - str: plain text
+    - list: multimodal content parts [{"type":"text","text":"..."}, ...]
+    - dict: single content part
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(item.get("text", item.get("content", str(item))))
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        return content.get("text", content.get("content", str(content)))
+    return str(content) if content else ""
 
 class RAGConfig(BaseModel):
     max_context_docs: int | None = None
@@ -359,7 +382,14 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
             yield _sse_chunk(rid, created, model, {"role": "assistant"})
             
             try:
-                user_text = next((m.content for m in req.messages[::-1] if m.role == "user"), "")
+                user_text = next((_normalize_content(m.content) for m in req.messages[::-1] if m.role == "user"), "")
+                
+                # Debug: log all messages to understand OpenWebUI format (especially file uploads)
+                for mi, m in enumerate(req.messages):
+                    raw = m.content
+                    content_type = type(raw).__name__
+                    content_str = _normalize_content(raw)
+                    print(f"📨 msg[{mi}] role={m.role} type={content_type} len={len(content_str)} preview={content_str[:150]!r}")
                 
                 # MVP: SimpleRAG with selected model (strip rag- prefix and -think suffix)
                 selected_model = model.replace("rag-", "", 1) if model.startswith("rag-") else (model or "llama4:latest")
@@ -556,7 +586,7 @@ Aufgabe: {user_text}"""
                             yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")
                             yield "data: [DONE]\n\n"
                             return
-                        instruction = user_text  # The whole message is the instruction
+                        instruction = user_text
                         transcript_text = preprocess_transcript(transcript_text)
                         print(f"📂 Loaded transcript file: {file_ref} ({len(transcript_text)} chars)")
                     else:
@@ -565,6 +595,25 @@ Aufgabe: {user_text}"""
                         transcript_text = preprocess_transcript(transcript_text)
                         if not instruction:
                             instruction = "Erstelle ein vollständiges Protokoll mit Pendenzenliste."
+                        
+                        # Fallback: If user message is short (just instruction, no transcript),
+                        # check if OpenWebUI injected file content via <context> in system message
+                        if len(transcript_text) < 200:
+                            import re as _re
+                            for m in req.messages:
+                                sys_content = _normalize_content(m.content)
+                                if m.role == "system" and "<context>" in sys_content:
+                                    ctx_match = _re.search(r'<context>\s*(.*?)\s*</context>', sys_content, _re.DOTALL)
+                                    if ctx_match:
+                                        owui_context = ctx_match.group(1).strip()
+                                        if len(owui_context) > len(transcript_text):
+                                            transcript_text = preprocess_transcript(owui_context)
+                                            instruction = user_text
+                                            print(f"📎 Using OpenWebUI <context>: {len(transcript_text)} chars")
+                                            if len(transcript_text) < 5000:
+                                                yield _sse_chunk(rid, created, model, {"content": f"⚠️ **Hinweis:** OpenWebUI hat nur {len(transcript_text)} von vermutlich viel mehr Zeichen übermittelt (Chunking). Für ein vollständiges Protokoll empfehle ich:\n- Text direkt in den Chat einfügen, oder\n- Dateipfad angeben: `Erstelle Protokoll aus der Datei /mein_transkript.txt`\n\n---\n\n"})
+                                            break
+                        
                         print(f"📝 Inline transcript: {len(transcript_text)} chars, instruction: {instruction[:80]}...")
                     
                     # Build messages for LLM - NO RAG search, direct processing
