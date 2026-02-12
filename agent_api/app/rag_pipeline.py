@@ -430,8 +430,10 @@ class SimpleRAGPipeline(RAGPipeline):
                               "wird", "hat", "sein", "haben", "werden", "diese", "dieser",
                               "diesen", "diesem", "suche", "suchen", "finde", "finden",
                               "zeige", "zeigen", "gib", "system", "abgelegt", "inhalt"}
-                query_terms = [t.strip().lower() for t in query.lower().split() 
-                              if len(t.strip()) >= 3 and t.strip().lower() not in stop_words]
+                import re
+                raw_terms = re.findall(r'[a-zäöüß0-9]+', query.lower())
+                query_terms = [t for t in raw_terms if len(t) >= 3 and t not in stop_words]
+                print(f"🔍 Query terms for source filter: {query_terms}")
                 max_snippet_only = 3
                 
                 tier1 = []  # Path matches (multiple query terms)
