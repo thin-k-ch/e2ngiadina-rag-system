@@ -1,6 +1,6 @@
 # 🏗️ Agentic RAG System – Architekturübersicht
 
-> **Stand:** 2025-02-12 | **Version:** Phase 4
+> **Stand:** 2025-02-12 | **Version:** Phase 5
 > **Zweck:** Vollständige technische Dokumentation zum Nachbauen des Systems
 
 ---
@@ -158,6 +158,10 @@ OLLAMA_BASE_URL=http://ollama:11434           # Direktzugriff auf Ollama
 OPENAI_API_BASE_URLS=http://agent_api:11436/v1 # RAG API als "OpenAI"
 OPENAI_API_KEYS=local
 DEFAULT_MODELS=agentic-rag,llama4:latest
+RAG_TOP_K=15                                   # Mehr Chunks bei File-Upload
+CHUNK_SIZE=2000                                # Grössere Chunks
+CHUNK_OVERLAP=200
+RAG_RELEVANCE_THRESHOLD=0.0                    # Alle Chunks senden
 ```
 
 ### 2.7 indexer (On-Demand)
@@ -182,6 +186,7 @@ agent_api/app/
 ├── chroma_client.py        # ChromaDB Client (PersistentClient)
 ├── source_analyzer.py      # Quellen-Referenz-Erkennung + Dokument-Volltext-Abruf
 ├── code_executor.py        # PyRunner Client (Code-Ausführung)
+├── transcript_processor.py  # Transkript→Protokoll (Erkennung, Vorverarbeitung, Prompt)
 ├── glossary.py             # Domain-Glossar (Akronyme, Fachbegriffe)
 ├── glossary.yaml           # Glossar-Definitionen
 ├── config_rag.py           # ES-Indices, Extension-Filter, Trigger-Patterns
@@ -210,6 +215,7 @@ POST /v1/chat/completions (SSE Stream)
     ├─ 2. Thinking-Mode? Nur wenn Modellname "-think" enthält
     ├─ 3. Multi-Source-Check: Referenziert "diese Dokumente"? → Pfad A
     ├─ 4. Single-Source-Check: Referenziert "[N]"? → Pfad B
+    ├─ 5. Transcript-Check: "Protokoll"/"Transkript" Keywords? → Pfad E
     │
     ▼ (nichts erkannt → normaler RAG)
     │
@@ -280,6 +286,36 @@ Dedizierter System-Prompt (exhaustive Analyse)
 pipeline._llm_stream() → Streame Antwort
     + Quellen-Links
 ```
+
+### 4.3 Transkript → Protokoll (Pfad E)
+
+```
+"Erstelle ein Protokoll aus der Datei /transkript.txt"
+    │
+    ├─ detect_transcript_mode() → "protocol" (Keyword-Match)
+    │
+    ├─ Datei-Referenz? → load_transcript_file() (Filesystem oder PyRunner)
+    │  ODER
+    ├─ Inline-Text? → separate_instruction_and_transcript()
+    │  ODER
+    ├─ OpenWebUI Upload? → <context> aus System-Message extrahieren
+    │
+    ├─ preprocess_transcript():
+    │     ├─ Header-Mappings parsen (SPEAKER_00: Felix)
+    │     └─ Auto-Korrekturen (Adnova→Atnova, Reticum→Rhäticom, etc.)
+    │
+    ├─ PROTOCOL_SYSTEM_PROMPT (strukturiertes Protokoll-Format)
+    │
+    ├─ Dynamisches num_ctx: input_tokens/3 + 16384 + 512
+    │     (Cap: 128K, Min: 4096)
+    │
+    ├─ Dynamischer Timeout: 120s / 300s / 600s je nach Textlänge
+    │
+    └─ pipeline._llm_stream(messages, num_predict=16384)
+         → Streame Protokoll
+```
+
+**Kein RAG, keine Suche, kein Ranking.** Volltext direkt ans LLM.
 
 ---
 
@@ -521,3 +557,4 @@ docker compose up -d runner
 | Tag | Datum | Inhalt |
 |-----|-------|--------|
 | `v2025.02.12-phase4` | 2025-02-12 | Code Execution + .eml Fix + Generic Follow-up |
+| `v2025.02.12-phase5` | 2025-02-12 | Transcript→Protocol + Dynamic num_ctx + OpenWebUI Context |

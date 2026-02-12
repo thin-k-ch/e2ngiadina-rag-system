@@ -1,6 +1,6 @@
 # 🔧 Agentic RAG System – Benutzerhandbuch
 
-> **Stand:** 2025-02-12 | **Version:** Phase 4 (Code Execution + Follow-up Context)
+> **Stand:** 2025-02-12 | **Version:** Phase 5 (Transcript-to-Protocol + Dynamic Context Window)
 
 ---
 
@@ -44,7 +44,7 @@ In OpenWebUI gibt es zwei Gruppen von Modellen:
 
 ---
 
-## 2. Die 4 Verarbeitungspfade
+## 2. Die 5 Verarbeitungspfade
 
 Wenn eine Frage gestellt wird, prüft das System der Reihe nach:
 
@@ -84,8 +84,54 @@ Beispiele:
 
 ---
 
+### Pfad E: Transkript → Protokoll (NEU)
+**Trigger:** Keywords wie "Protokoll", "Transkript", "Pendenzen", "Whisper", "Sitzung" etc.
+
+Beispiele:
+```
+"Erstelle ein Protokoll aus diesem Transkript: [Text]"
+"Erstelle ein Sitzungsprotokoll aus der Datei /AuditVorbereitung.txt"
+"Verarbeite dieses Meeting-Transkript zu einem Protokoll mit Pendenzenliste"
+```
+
+**Was passiert:**
+1. RAG-Suche wird **komplett übersprungen** – Volltext geht direkt ans LLM
+2. **Vorverarbeitung:**
+   - Header-Mappings werden angewendet (z.B. `SPEAKER_00: Felix`)
+   - Auto-Korrekturen für bekannte Whisper-Fehler (Adnova→Atnova, etc.)
+3. Spezialisierter **Protokoll-Prompt** generiert:
+   - Sitzungskopf (Datum, Teilnehmende, Thema)
+   - Traktanden mit Diskussion, Aussagen, Entscheidungen
+   - Beschlüsse und Entscheidungen (nummeriert)
+   - **Pendenzenliste** als Tabelle (Nr, Pendenz, Verantwortlich, Termin, Status)
+   - Nächste Schritte
+4. **Dynamisches Context Window** (num_ctx) – passt sich automatisch an die Textlänge an
+5. **Dynamischer Timeout** – bis 10 Minuten für lange Transkripte
+
+**3 Eingabemethoden:**
+
+| Methode | Anleitung | Qualität |
+|---------|-----------|----------|
+| **Dateipfad** (empfohlen) | `Erstelle Protokoll aus der Datei /mein_transkript.txt` | ✅ Voll |
+| **Text einfügen** | Text direkt in den Chat einfügen | ✅ Voll |
+| **Datei-Upload (📎)** | Büroklammer in OpenWebUI | ⚠️ Teilweise (OpenWebUI chunked) |
+
+**Header-Format für Speaker-Ersetzung:**
+
+Am Anfang der Transkript-Datei manuell hinzufügen:
+```
+SPEAKER_00: Felix
+SPEAKER_01: Stefano
+
+SPEAKER_00 [0.00-5.02]:
+Entschuldigung, so...
+```
+→ Alle `SPEAKER_00` werden automatisch durch `Felix` ersetzt.
+
+---
+
 ### Pfad C: Normaler RAG-Flow (Standard)
-**Trigger:** Jede "normale" Frage, die nicht unter A oder B fällt.
+**Trigger:** Jede "normale" Frage, die nicht unter A, B oder E fällt.
 
 Beispiele:
 ```
@@ -190,6 +236,8 @@ xlsx, xls, pptx, ppt
 - **Kein Internet-Zugriff** (kein Web-Search, kein Download)
 - **Keine Bild/Scan-Analyse** (nur Text-Extrakt aus PDFs)
 - **Kein Chat-übergreifendes Gedächtnis** – jeder Chat ist eine eigene Session
-- **Max ~12'000 Zeichen** pro Dokument im Kontext (wird gekürzt)
+- **Max ~12'000 Zeichen** pro Dokument im Kontext (wird gekürzt bei RAG-Pfad)
 - **Max 5 Dokumente** bei Multi-Dokument-Analyse
 - **Max 3 vorherige Quellen** als Follow-up-Kontext
+- **Datei-Upload via OpenWebUI** ist begrenzt (Chunking) – Dateipfad oder Text-Paste bevorzugen
+- **Context Window:** Dynamisch bis 128K Tokens (modellabhängig)
