@@ -10,7 +10,7 @@ echo "Project: ${ROOT_DIR}"
 # --- Ensure docker daemon is ready (wait up to 90s) ---
 echo "Checking Docker daemon readiness..."
 if ! docker info >/dev/null 2>&1; then
-  echo "Docker not ready yet. Waiting up to 90s..."
+  echo "Docker not ready yet. Waiting up to 90s...(maybe: sudo systemctl enable --now docker && sudo usermod -aG docker $USER ) "
   for i in $(seq 1 90); do
     if docker info >/dev/null 2>&1; then
       echo "OK: Docker is ready."

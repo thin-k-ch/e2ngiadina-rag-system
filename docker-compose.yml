@@ -22,6 +22,7 @@ services:
       context: ./agent_api
       dockerfile: Dockerfile
     container_name: e2ngiadina-api
+    restart: "no"  # NICHT auto-restart – wird via START.sh mit --build gestartet
     ports:
       - "11436:11436"
     environment:
@@ -114,6 +115,7 @@ services:
       context: ./runner
       dockerfile: Dockerfile
     container_name: e2ngiadina-runner
+    restart: "no"  # NICHT auto-restart – wird via START.sh mit --build gestartet
     ports:
       - "9000:9000"
     environment:
