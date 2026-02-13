@@ -1,6 +1,6 @@
 # 🏗️ Agentic RAG System – Architekturübersicht
 
-> **Stand:** 2025-02-12 | **Version:** Phase 5
+> **Stand:** 2026-02-13 | **Version:** Phase 6
 > **Zweck:** Vollständige technische Dokumentation zum Nachbauen des Systems
 
 ---
@@ -317,6 +317,75 @@ pipeline._llm_stream() → Streame Antwort
 
 **Kein RAG, keine Suche, kein Ranking.** Volltext direkt ans LLM.
 
+### 4.4 ReAct Agent – Autonomer Tool-Loop (Pfad F) [Phase 6]
+
+```
+User-Query (Tool-Calling-fähiges Modell)
+    │
+    ├─ REACT_MODELS: llama4:latest, qwen2.5:72b, llama3.3:70b
+    │
+    ├─ Tenant-Kontext laden (X-Tenant-ID Header oder ACTIVE_TENANT)
+    │     → Glossar, System-Prompt, ES-Index, Document-Root
+    │
+    ├─ Query-Analyse:
+    │     ├─ Dateisystem-Query? → Forced execute_python (auto-generierter Code)
+    │     ├─ Dokument-Query + LLM ruft kein Tool auf? → Forced search_documents
+    │     └─ Sonst → LLM entscheidet autonom
+    │
+    ├─ ReAct Loop (max 6 Schritte):
+    │     ├─ LLM mit Tools aufrufen (non-streaming, Ollama /api/chat)
+    │     ├─ tool_calls vorhanden? → Executor ausführen → Ergebnis in Messages
+    │     ├─ Keine tool_calls? → Final Answer streamen
+    │     └─ Wiederhole bis Antwort oder max_steps
+    │
+    └─ Streaming Final Answer + Quellen-Links
+```
+
+**7 Tools im ReAct Agent:**
+
+| Tool | Beschreibung | Executor |
+|------|-------------|----------|
+| `search_documents` | ES+Chroma Hybrid-Suche | `tools.search_hybrid()` |
+| `read_document` | Volltext aus ES-Index | `source_analyzer.fetch_document_text()` |
+| `execute_python` | Sandbox-Code via PyRunner | `code_executor.execute_code()` |
+| `create_protocol` | Transkript → Protokoll | `transcript_processor` + LLM |
+| `list_files` | Verzeichnisinhalt auflisten | PyRunner `os.listdir()` |
+| `read_file` | Datei direkt lesen (CSV, TXT) | PyRunner `open()` |
+| `web_search` | Internet-Suche (Brave/Serper) | HTTP API (braucht API-Key) |
+
+**Forced-Step Mechanismus:**
+- Dateisystem-Queries (`_auto_filesystem_code`): Erkennt "wie viele Dateien", "Ordnerstruktur" etc. und generiert automatisch Python-Code
+- Dokument-Queries (`_needs_search`): Wenn LLM Step 0 ohne Tool-Call beendet, wird `search_documents` erzwungen
+- Grüsse/Chat-Fragen werden erkannt und übersprungen
+
+### 4.5 Mandantenfähigkeit (Multi-Tenant) [Phase 6]
+
+```
+tenants/
+├── _template.yaml          # Vorlage für neue Mandanten
+└── sbb-tfk-2020.yaml       # Aktiver Mandant
+```
+
+**Tenant-Konfiguration (YAML):**
+- `name`, `short_name`: Mandant-Identifikation
+- `document_root`: Pfad zum Projektarchiv
+- `es_index`: Elasticsearch Index-Name
+- `chroma_prefix`: ChromaDB Collection-Prefix
+- `glossary`: Fachbegriffe (→ System-Prompt)
+- `system_prompt_extra`: Domain-spezifischer Prompt-Zusatz
+- `transcript_corrections`: Whisper Auto-Korrekturen
+- `ext_filter`: Datei-Erweiterungen für ES-Suche
+
+**Tenant-Auflösung (Priorität):**
+1. `X-Tenant-ID` HTTP-Header im Request
+2. `ACTIVE_TENANT` Environment-Variable
+3. Erster Mandant alphabetisch
+4. Fallback: Environment-Variablen (FILE_BASE, ES_INDEX)
+
+**API-Endpunkte:**
+- `GET /tenants` – Liste aller Mandanten
+- `POST /tenants/switch/{short_name}` – Aktiven Mandanten wechseln
+
 ---
 
 ## 5. Elasticsearch Index
@@ -503,8 +572,19 @@ docker compose run --rm indexer
 │
 └── AGENTIC/                        # Git Repository (dieses Projekt)
     ├── agent_api/                  # RAG Backend
+    │   └── app/
+    │       ├── main.py             # FastAPI Routing, SSE, Pfade A-F
+    │       ├── react_agent.py      # [P6] ReAct Agent + 7 Tools
+    │       ├── tenant_manager.py   # [P6] Mandantenverwaltung
+    │       ├── rag_pipeline.py     # SimpleRAGPipeline, Dynamic num_ctx
+    │       ├── tools.py            # ES+Chroma Hybrid-Suche
+    │       ├── source_analyzer.py  # Quellen-Referenz-Erkennung
+    │       ├── code_executor.py    # PyRunner Client
+    │       ├── transcript_processor.py # Transkript→Protokoll
+    │       └── config_rag.py       # ES-Config, Triggers, Stop-Rules
     ├── runner/                     # Python Sandbox
     ├── indexer/                    # Dokument-Indexer
+    ├── tenants/                    # [P6] Mandant-Konfigurationen (YAML)
     ├── docs/                       # Dokumentation
     ├── docker-compose.yml
     ├── START.sh / STOP.sh
