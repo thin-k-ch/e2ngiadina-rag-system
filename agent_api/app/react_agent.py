@@ -541,6 +541,13 @@ class ReactAgent:
         self.ollama_base = (ollama_base or os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")).rstrip("/")
         self.max_steps = 6
         self.tenant = tenant  # TenantConfig or None
+        # Models that don't support native tool-calling use prompt-based fallback
+        # Pre-detect known reasoning models without native tool support
+        _NO_NATIVE_TOOLS = ["deepseek-r1", "deepseek-r2", "qwq", "phi4-reasoning"]
+        model_base = self.model.split(":")[0].lower()
+        self._use_prompt_tools = any(nt in model_base for nt in _NO_NATIVE_TOOLS)
+        if self._use_prompt_tools:
+            print(f"🧠 Model {self.model}: using prompt-based tool calling (no native tools)")
     
     async def run(
         self,
@@ -592,8 +599,18 @@ class ReactAgent:
         all_sources = []
         forced_search_done = False  # Track if we did a forced search (to give LLM extra step for read_document)
         
-        # --- Forced first step for filesystem queries ---
+        # --- Shortcut for prompt-tool models on simple queries ---
         fs_code = self._auto_filesystem_code(query)
+        if self._use_prompt_tools and not fs_code and not self._needs_search(query):
+            print(f"⚡ Prompt-tool model shortcut: simple query, skipping tool-calling")
+            yield {"type": "phase", "content": ""}
+            # For prompt-tool models, stream directly without tool instructions
+            async for token in self._llm_stream_final(messages):
+                yield {"type": "token", "content": token}
+            yield {"type": "done"}
+            return
+        
+        # --- Forced first step for filesystem queries ---
         if fs_code:
             print(f"📂 Forced execute_python for filesystem query")
             yield {"type": "phase", "content": "⚙️ Dateisystem-Analyse...\n\n"}
@@ -738,8 +755,46 @@ class ReactAgent:
     # LLM Calls
     # ------------------------------------------------------------------
     
+    def _build_prompt_tools_instruction(self) -> str:
+        """Build tool-calling instructions for models that don't support native tools."""
+        tool_descs = []
+        for t in TOOLS:
+            func = t["function"]
+            params = func.get("parameters", {}).get("properties", {})
+            param_strs = ['"' + k + '": "<' + v.get("description", k) + '>"' for k, v in params.items()]
+            param_block = "{" + ", ".join(param_strs) + "}"
+            tool_descs.append("- **" + func["name"] + "**: " + func["description"] + "\n  Parameter: " + param_block)
+        return (
+            "\n\nWICHTIG – TOOL-AUFRUFE:\n"
+            "Du hast folgende Tools zur Verfügung:\n" +
+            "\n".join(tool_descs) +
+            "\n\nWenn du ein Tool nutzen willst, antworte mit GENAU diesem Format:\n"
+            '<tool_call>{"name": "tool_name", "arguments": {"param": "wert"}}</tool_call>\n'
+            "Du kannst pro Antwort EIN Tool aufrufen. Nach dem Tool-Ergebnis kannst du weitere Tools aufrufen oder die finale Antwort geben.\n"
+            "Wenn du KEIN Tool brauchst, antworte direkt mit deiner Antwort (OHNE <tool_call> Tags).\n"
+        )
+    
+    def _parse_prompt_tool_calls(self, content: str) -> list:
+        """Parse tool calls from text output of models using prompt-based tool calling."""
+        import re
+        tool_calls = []
+        # Match <tool_call>...</tool_call> blocks
+        pattern = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
+        matches = re.findall(pattern, content, re.DOTALL)
+        for match in matches:
+            try:
+                parsed = json.loads(match)
+                name = parsed.get("name", "")
+                arguments = parsed.get("arguments", {})
+                if name:
+                    tool_calls.append({"function": {"name": name, "arguments": arguments}})
+            except json.JSONDecodeError:
+                print(f"⚠️ Could not parse tool call: {match[:100]}")
+        return tool_calls
+    
     async def _llm_with_tools(self, messages: list) -> dict:
-        """Non-streaming LLM call with tool definitions. Retries once on timeout/connection error."""
+        """Non-streaming LLM call with tool definitions. Retries once on timeout/connection error.
+        Falls back to prompt-based tool calling if model returns 400 (no native tool support)."""
         import httpx
         
         # Estimate tokens for dynamic context window
@@ -747,6 +802,10 @@ class ReactAgent:
         est_tokens = total_chars // 3
         num_ctx = max(4096, est_tokens + 8192 + 512)
         num_ctx = min(num_ctx, 131072)
+        
+        # For prompt-based tool calling, inject tool instructions into messages
+        if self._use_prompt_tools:
+            return await self._llm_with_prompt_tools(messages, num_ctx, total_chars)
         
         payload = {
             "model": self.model,
@@ -772,6 +831,13 @@ class ReactAgent:
                     r = await client.post(f"{self.ollama_base}/api/chat", json=payload)
                     r.raise_for_status()
                     return r.json()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 400:
+                    # Model doesn't support native tool-calling → switch to prompt-based
+                    print(f"⚠️ Model {self.model} returned 400 with tools → switching to prompt-based tool calling")
+                    self._use_prompt_tools = True
+                    return await self._llm_with_prompt_tools(messages, num_ctx, total_chars)
+                raise LLMError(f"HTTP {e.response.status_code}: {e}")
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadError) as e:
                 last_err = e
                 if attempt == 0:
@@ -784,6 +850,86 @@ class ReactAgent:
                     print(f"❌ LLM call failed (attempt 2/2): {type(e).__name__}: {e}")
         raise LLMError(f"LLM nicht erreichbar nach 2 Versuchen: {type(last_err).__name__}")
     
+    def _augment_messages_for_prompt_tools(self, messages: list) -> list:
+        """Convert messages to prompt-based format (inject tool instructions, convert tool roles)."""
+        tool_instruction = self._build_prompt_tools_instruction()
+        augmented = []
+        injected = False
+        for m in messages:
+            if m["role"] == "system" and not injected:
+                augmented.append({"role": "system", "content": m["content"] + tool_instruction})
+                injected = True
+            elif m["role"] == "tool":
+                augmented.append({"role": "user", "content": f"[Tool-Ergebnis]:\n{m['content']}"})
+            elif "tool_calls" in m:
+                tc = m.get("tool_calls", [{}])[0]
+                func = tc.get("function", {})
+                tc_name = func.get("name", "")
+                tc_args = json.dumps(func.get("arguments", {}))
+                tc_text = '<tool_call>{"name": "' + tc_name + '", "arguments": ' + tc_args + '}</tool_call>'
+                augmented.append({"role": "assistant", "content": tc_text})
+            else:
+                augmented.append({"role": m["role"], "content": m.get("content", "")})
+        return augmented
+    
+    async def _llm_with_prompt_tools(self, messages: list, num_ctx: int, total_chars: int) -> dict:
+        """Prompt-based tool calling using STREAMING internally to avoid timeouts with reasoning models.
+        Collects the full response, strips <think> blocks, then parses tool calls from text."""
+        import httpx
+        import re
+        
+        augmented_messages = self._augment_messages_for_prompt_tools(messages)
+        
+        payload = {
+            "model": self.model,
+            "messages": augmented_messages,
+            "stream": True,
+            "options": {
+                "num_ctx": num_ctx,
+                "temperature": 0.2,
+            }
+        }
+        
+        timeout = 600.0  # Long timeout for reasoning models
+        
+        print(f"🔧 ReAct LLM (prompt-tools/stream): {total_chars} chars, num_ctx={num_ctx}, model={self.model}")
+        
+        # Stream and collect full response
+        full_content = []
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=30.0, read=120.0)) as client:
+            async with client.stream("POST", f"{self.ollama_base}/api/chat", json=payload) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        token = obj.get("message", {}).get("content", "")
+                        if token:
+                            full_content.append(token)
+                    except:
+                        pass
+        
+        content = "".join(full_content)
+        print(f"🔧 Prompt-tools response: {len(content)} chars collected")
+        
+        # Strip <think>...</think> blocks (DeepSeek-R1 reasoning)
+        clean_content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+        
+        # Parse tool calls from text
+        tool_calls = self._parse_prompt_tool_calls(clean_content)
+        
+        result = {"message": {"role": "assistant", "content": clean_content}}
+        
+        if tool_calls:
+            # Also strip <tool_call> tags from display content
+            display_content = re.sub(r'<tool_call>.*?</tool_call>', '', clean_content, flags=re.DOTALL).strip()
+            result["message"]["tool_calls"] = tool_calls
+            result["message"]["content"] = display_content
+            print(f"🔧 Parsed {len(tool_calls)} tool call(s) from text: {[tc['function']['name'] for tc in tool_calls]}")
+        
+        return result
+    
     async def _llm_stream_final(self, messages: list) -> AsyncGenerator[str, None]:
         """Streaming LLM call for final answer (no tools). Retries once on timeout/connection error."""
         import httpx
@@ -794,10 +940,23 @@ class ReactAgent:
         num_ctx = min(num_ctx, 131072)
         
         # Remove tool_calls from messages for clean streaming
+        # For prompt-based models: convert tool/tool_calls messages to plain text
         clean_messages = []
         for m in messages:
-            clean = {"role": m["role"], "content": m.get("content", "")}
-            clean_messages.append(clean)
+            role = m["role"]
+            content = m.get("content", "")
+            if role == "tool":
+                # Convert tool results to user message
+                clean_messages.append({"role": "user", "content": f"[Tool-Ergebnis]:\n{content}"})
+            elif "tool_calls" in m:
+                # Convert tool_call to assistant text
+                tc = m.get("tool_calls", [{}])[0]
+                func = tc.get("function", {})
+                tc_name = func.get("name", "")
+                tc_args = json.dumps(func.get("arguments", {}))
+                clean_messages.append({"role": "assistant", "content": f"Tool aufgerufen: {tc_name}({tc_args})"})
+            else:
+                clean_messages.append({"role": role, "content": content})
         
         payload = {
             "model": self.model,
@@ -813,8 +972,11 @@ class ReactAgent:
         timeout = 300.0
         if total_chars > 20000:
             timeout = 600.0
+        # Reasoning models need much longer for first token (internal <think> phase)
+        if self._use_prompt_tools:
+            timeout = max(timeout, 600.0)
         
-        print(f"🔧 ReAct stream: {total_chars} chars, num_ctx={num_ctx}, model={self.model}")
+        print(f"🔧 ReAct stream: {total_chars} chars, num_ctx={num_ctx}, timeout={timeout}s, model={self.model}")
         
         last_err = None
         for attempt in range(2):

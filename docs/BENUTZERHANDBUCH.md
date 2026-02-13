@@ -27,7 +27,8 @@ Kein `rag-` Prefix nötig – Modelle erscheinen unter ihrem echten Ollama-Namen
 
 | Modell | Grösse | Beschreibung |
 |--------|--------|--------------|
-| `llama4:latest` | 67 GB | Grosses Modell, stabil und gründlich |
+| `llama4:latest` | 67 GB | Grosses Allround-Modell, stabil und gründlich |
+| `deepseek-r1:70b` | 42 GB | **Reasoning-Modell** – bestes Denken, aber langsam (~3 Min/Step) |
 | `gpt-oss:latest` | 13 GB | Mittleres Modell, schnell |
 | `qwen2.5:3b` | 1.9 GB | Kleines Modell, sehr schnell für einfache Fragen |
 | `MichelRosselli/apertus:70b-...` | 43 GB | Schweizerdeutsch-Transkription |
@@ -42,7 +43,8 @@ Kein `rag-` Prefix nötig – Modelle erscheinen unter ihrem echten Ollama-Namen
 - Mehrstufige Recherche: Suchen → Dokument lesen → Vertiefen → Antworten
 
 ### Tipps:
-- **Grosses Modell** (llama4) für gründliche Recherchen und komplexe Fragen
+- **Reasoning** (deepseek-r1) für komplexe Analysen, logische Schlüsse, Vergleiche – Geduld nötig!
+- **Grosses Modell** (llama4) für gründliche Recherchen, guter Allrounder
 - **Mittleres Modell** (gpt-oss) für schnelle Antworten mit guter Qualität
 - **Kleines Modell** (qwen2.5:3b) für einfache Fragen und schnelle Tests
 
@@ -134,8 +136,8 @@ Entschuldigung, so...
 
 ---
 
-### Pfad F: ReAct Agent – Autonome Recherche (NEU Phase 6)
-**Trigger:** Modelle `llama4:latest`, `qwen2.5:72b`, `llama3.3:70b` (automatisch)
+### Pfad F: ReAct Agent – Autonome Recherche
+**Trigger:** Alle Modelle (automatisch via Auto-Discovery)
 
 Beispiele:
 ```
@@ -265,7 +267,7 @@ xlsx, xls, pptx, ppt
 | **Vergleich** | *"Vergleiche diese Dokumente"* → Pfad A, alle vorherigen Quellen |
 | **Dateien zählen/listen** | Explizit *"Schreibe Python-Code"* oder *"Zähle alle..."* |
 | **Tabellen** | *"Erstelle eine Tabelle mit..."* → LLM kann Markdown-Tabellen oder Python/pandas nutzen |
-| **Komplexe Analyse** | `-think` Modell wählen → sichtbarer Analyseschritt vor der Antwort |
+| **Komplexe Analyse** | `deepseek-r1:70b` wählen → tiefes Reasoning (langsam aber gründlich) |
 | **Neues Thema** | **Neuen Chat** starten – sonst wird alter Kontext mitgeschleppt |
 
 ---

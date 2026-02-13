@@ -59,7 +59,10 @@
 - **Modell-Management via UI**: Neue Modelle pullen/löschen direkt in OpenWebUI
 - **Embedding-Schutz**: `mxbai-embed-large` kann nicht gelöscht werden (technisch nötig für Vektorsuche)
 - **Aufgeräumte Modelle**: qwen2.5:72b, qwen2.5:14b, llama3.1 entfernt (~100 GB frei)
-- **Aktiver Kern**: llama4 (67GB), gpt-oss (13GB), qwen2.5:3b (1.9GB), apertus:70b (43GB)
+- **Aktiver Kern**: llama4 (67GB), deepseek-r1:70b (42GB), gpt-oss (13GB), qwen2.5:3b (1.9GB), apertus:70b (43GB)
+- **Prompt-basiertes Tool-Calling**: Reasoning-Modelle (DeepSeek-R1, QwQ, etc.) ohne native Tool-API werden automatisch erkannt und nutzen Prompt-basierten Fallback mit `<tool_call>` Tags
+- **Greeting-Shortcut**: Prompt-Tool-Modelle überspringen den teuren Tool-Prompt bei einfachen Fragen
+- **Timeouts**: Reasoning-Modelle erhalten 600s statt 300s (lange `<think>`-Phase)
 
 #### 3.3 Indexer-Verbesserungen
 - **Inkrementelles Re-Indexing**: Nur geänderte Dateien neu indexieren (Manifest existiert)
@@ -151,13 +154,12 @@
 ## 5. Hardware-Potential (DGX Spark)
 
 Die NVIDIA DGX Spark hat 128GB RAM und GPU. Aktuell genutzt:
-- Ollama: ~65GB (llama4:latest)
+- Ollama: ~125GB gesamt (llama4:67GB, deepseek-r1:42GB, gpt-oss:13GB, qwen2.5:3b, apertus:43GB, mxbai-embed)
 - ES: ~2GB
 - ChromaDB + Services: ~4GB
-- **Frei: ~55GB**
+- **Hinweis**: Nicht alle Modelle gleichzeitig im VRAM – Ollama lädt/entlädt automatisch
 
 Möglichkeiten:
 - **Whisper Large V3**: ~3GB GPU RAM → lokale Transkription
 - **Cross-Encoder Reranking**: ~1GB → bessere Suchergebnisse
-- **Zweites LLM parallel**: z.B. kleines Modell für schnelle Aufgaben (Titel, Klassifikation)
-- **Grösseres Modell**: mistral-large:123b (~75GB) für komplexe Analysen
+- **Hinweis zu DeepSeek-R1:70b**: Reasoning-Modell mit `<think>`-Phase, ~3 Min/Step, ideal für komplexe Analysen aber langsam
