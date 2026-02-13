@@ -20,11 +20,11 @@
 
 ## 2. Offene Punkte aus Phase 6
 
-### 2.1 Web-Suche (braucht API-Key)
-- `web_search` Tool ist implementiert, aber braucht `BRAVE_API_KEY` oder `SERPER_API_KEY`
-- **Aktion:** Key beschaffen und in `docker-compose.yml` eintragen
-- Brave Search: https://brave.com/search/api/ (kostenlos bis 2000 Anfragen/Monat)
-- Serper.dev: https://serper.dev/ (kostenlos bis 2500 Anfragen/Monat)
+### 2.1 ~~Web-Suche (braucht API-Key)~~ ✅ Erledigt
+- SearXNG als self-hosted Meta-Suchmaschine integriert (kein API-Key nötig)
+- Container: `searxng/searxng:latest`, Config: `searxng/settings.yml`
+- Fallback-Kette: SearXNG → Brave API → Serper.dev
+- Getestet unter `rag-llama4:latest` ✅
 
 ### 2.2 Fess-Plugins aus ES entfernen
 - Dockerfile bereinigt (Plugins auskommentiert), ES-Container muss einmal neu gebaut werden

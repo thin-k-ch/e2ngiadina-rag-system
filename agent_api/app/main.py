@@ -712,33 +712,47 @@ Aufgabe: {user_text}"""
                             chat_history.append({"role": m.role, "content": content})
                     chat_history = chat_history[-6:]
                     
-                    from .react_agent import ReactAgent
+                    from .react_agent import ReactAgent, LLMError
                     agent = ReactAgent(model=selected_model, tenant=tenant)
                     
-                    async for event in agent.run(query=user_text, chat_history=chat_history):
-                        etype = event.get("type")
-                        
-                        if etype == "phase":
-                            yield _sse_chunk(rid, created, model, {"content": event["content"]})
-                        elif etype == "token":
-                            yield _sse_chunk(rid, created, model, {"content": event["content"]})
-                        elif etype == "sources":
-                            src_list = event.get("sources", [])
-                            if src_list:
-                                source_lines = []
-                                for s in src_list:
-                                    n = s.get('n', '?')
-                                    dp = s.get('display_path', s.get('path', ''))
-                                    url = s.get('local_url', '')
-                                    if url:
-                                        source_lines.append(f"[{n}] [{dp}]({url})")
-                                    else:
-                                        source_lines.append(f"[{n}] {dp}")
-                                yield _sse_chunk(rid, created, model, {"content": "\n\nQuellen:\n" + "\n".join(source_lines)})
-                                # Save sources for "Analysiere Quelle [N]" feature
-                                store.save("last_sources", "", "", sources=src_list)
-                        elif etype == "done":
-                            pass
+                    try:
+                        async for event in agent.run(query=user_text, chat_history=chat_history):
+                            etype = event.get("type")
+                            
+                            if etype == "phase":
+                                yield _sse_chunk(rid, created, model, {"content": event["content"]})
+                            elif etype == "token":
+                                yield _sse_chunk(rid, created, model, {"content": event["content"]})
+                            elif etype == "sources":
+                                src_list = event.get("sources", [])
+                                if src_list:
+                                    source_lines = []
+                                    for s in src_list:
+                                        n = s.get('n', '?')
+                                        dp = s.get('display_path', s.get('path', ''))
+                                        url = s.get('local_url', '')
+                                        if url:
+                                            source_lines.append(f"[{n}] [{dp}]({url})")
+                                        else:
+                                            source_lines.append(f"[{n}] {dp}")
+                                    yield _sse_chunk(rid, created, model, {"content": "\n\nQuellen:\n" + "\n".join(source_lines)})
+                                    # Save sources for "Analysiere Quelle [N]" feature
+                                    store.save("last_sources", "", "", sources=src_list)
+                            elif etype == "done":
+                                pass
+                    except LLMError as e:
+                        print(f"❌ ReAct LLMError: {e}")
+                        err_msg = (f"\n\n⚠️ **Fehler:** Das Sprachmodell ({selected_model}) hat nicht rechtzeitig geantwortet.\n\n"
+                                   f"**Details:** {e}\n\n"
+                                   f"**Tipps:**\n"
+                                   f"- Versuche es erneut (einfach nochmal senden)\n"
+                                   f"- Wechsle zu einem schnelleren Modell (z.B. `rag-llama4:latest`)\n"
+                                   f"- Verkürze die Anfrage\n")
+                        yield _sse_chunk(rid, created, model, {"content": err_msg})
+                    except Exception as e:
+                        print(f"❌ ReAct unexpected error: {type(e).__name__}: {e}")
+                        err_msg = f"\n\n⚠️ **Unerwarteter Fehler:** {type(e).__name__}: {e}\n\nBitte versuche es erneut.\n"
+                        yield _sse_chunk(rid, created, model, {"content": err_msg})
                     
                     store.save(conv_id, summary, notes)
                     yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")

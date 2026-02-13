@@ -18,6 +18,11 @@ import asyncio
 import time
 from typing import AsyncGenerator, Dict, Any, List, Optional
 
+
+class LLMError(Exception):
+    """Raised when LLM calls fail after retries (timeout, connection error)."""
+    pass
+
 # ---------------------------------------------------------------------------
 # Tool Definitions (Ollama/OpenAI function-calling format)
 # ---------------------------------------------------------------------------
@@ -720,7 +725,7 @@ class ReactAgent:
     # ------------------------------------------------------------------
     
     async def _llm_with_tools(self, messages: list) -> dict:
-        """Non-streaming LLM call with tool definitions"""
+        """Non-streaming LLM call with tool definitions. Retries once on timeout/connection error."""
         import httpx
         
         # Estimate tokens for dynamic context window
@@ -746,13 +751,27 @@ class ReactAgent:
         
         print(f"🔧 ReAct LLM: {total_chars} chars, num_ctx={num_ctx}, model={self.model}")
         
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
-            r = await client.post(f"{self.ollama_base}/api/chat", json=payload)
-            r.raise_for_status()
-            return r.json()
+        last_err = None
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15.0, read=timeout)) as client:
+                    r = await client.post(f"{self.ollama_base}/api/chat", json=payload)
+                    r.raise_for_status()
+                    return r.json()
+            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadError) as e:
+                last_err = e
+                if attempt == 0:
+                    print(f"⚠️ LLM call failed (attempt 1/2): {type(e).__name__}: {e}")
+                    print(f"🔄 Retrying with +60s timeout...")
+                    timeout += 60.0
+                    import asyncio
+                    await asyncio.sleep(2)
+                else:
+                    print(f"❌ LLM call failed (attempt 2/2): {type(e).__name__}: {e}")
+        raise LLMError(f"LLM nicht erreichbar nach 2 Versuchen: {type(last_err).__name__}")
     
     async def _llm_stream_final(self, messages: list) -> AsyncGenerator[str, None]:
-        """Streaming LLM call for final answer (no tools)"""
+        """Streaming LLM call for final answer (no tools). Retries once on timeout/connection error."""
         import httpx
         
         total_chars = sum(len(m.get("content", "")) for m in messages)
@@ -783,23 +802,41 @@ class ReactAgent:
         
         print(f"🔧 ReAct stream: {total_chars} chars, num_ctx={num_ctx}, model={self.model}")
         
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
-            async with client.stream(
-                "POST",
-                f"{self.ollama_base}/api/chat",
-                json=payload
-            ) as r:
-                r.raise_for_status()
-                async for line in r.aiter_lines():
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                        content = obj.get("message", {}).get("content", "")
-                        if content:
-                            yield content
-                    except:
-                        pass
+        last_err = None
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15.0, read=timeout)) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{self.ollama_base}/api/chat",
+                        json=payload
+                    ) as r:
+                        r.raise_for_status()
+                        got_tokens = False
+                        async for line in r.aiter_lines():
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                                content = obj.get("message", {}).get("content", "")
+                                if content:
+                                    got_tokens = True
+                                    yield content
+                            except:
+                                pass
+                        if got_tokens:
+                            return
+            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadError) as e:
+                last_err = e
+                if attempt == 0:
+                    print(f"⚠️ LLM stream failed (attempt 1/2): {type(e).__name__}: {e}")
+                    print(f"🔄 Retrying stream with +60s timeout...")
+                    timeout += 60.0
+                    import asyncio
+                    await asyncio.sleep(2)
+                else:
+                    print(f"❌ LLM stream failed (attempt 2/2): {type(e).__name__}: {e}")
+                    raise LLMError(f"LLM-Streaming fehlgeschlagen nach 2 Versuchen: {type(last_err).__name__}")
     
     # ------------------------------------------------------------------
     # Helpers
