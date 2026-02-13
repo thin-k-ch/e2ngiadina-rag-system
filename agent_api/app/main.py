@@ -640,9 +640,8 @@ Aufgabe: {user_text}"""
                                         if len(owui_context) > len(transcript_text):
                                             transcript_text = preprocess_transcript(owui_context)
                                             instruction = user_text
-                                            print(f"📎 Using OpenWebUI <context>: {len(transcript_text)} chars")
-                                            if len(transcript_text) < 5000:
-                                                yield _sse_chunk(rid, created, model, {"content": f"⚠️ **Hinweis:** OpenWebUI hat nur {len(transcript_text)} von vermutlich viel mehr Zeichen übermittelt (Chunking). Für ein vollständiges Protokoll empfehle ich:\n- Text direkt in den Chat einfügen, oder\n- Dateipfad angeben: `Erstelle Protokoll aus der Datei /mein_transkript.txt`\n\n---\n\n"})
+                                            print(f"📎 Using OpenWebUI file upload: {len(transcript_text)} chars")
+                                            yield _sse_chunk(rid, created, model, {"content": f"📎 Datei-Upload erkannt ({len(transcript_text):,} Zeichen). Erstelle Protokoll...\n\n"})
                                             break
                         
                         print(f"📝 Inline transcript: {len(transcript_text)} chars, instruction: {instruction[:80]}...")
