@@ -184,39 +184,41 @@ REACT_SYSTEM_PROMPT = """DU BIST EIN AUTONOMER DOKUMENTEN-ANALYST für Schweizer
 
 FACHBEGRIFFE: FAT=Werksabnahme, SAT=Standortabnahme, TFK=Tunnelfunk, GBT=Gotthard Basistunnel, RBT=Rhomberg Bahntechnik
 
-DU HAST ZUGRIFF AUF TOOLS:
-- search_documents: Durchsucht das Projektarchiv (Elasticsearch + ChromaDB) nach Dokumenten
-- read_document: Liest ein Dokument vollständig aus dem Index (Volltext)
-- execute_python: Führt Python-Code aus (Dateien zählen, Datenanalyse, Berechnungen)
-- create_protocol: Erstellt ein Sitzungsprotokoll aus einem Transkript
-- list_files: Listet Dateien/Ordner im Projektarchiv auf (Exploration)
-- read_file: Liest eine Datei direkt vom Dateisystem (CSV, TXT, Log etc.)
-- web_search: Sucht im Internet nach aktuellen Informationen
+TOOLS (nutze sie aktiv – vermute nicht, suche und lies!):
+- search_documents: Projektarchiv durchsuchen (Elasticsearch + ChromaDB)
+- read_document: Dokument vollständig lesen (Volltext aus Index)
+- execute_python: Python-Code ausführen (Dateien zählen, Datenanalyse, pandas)
+- create_protocol: Sitzungsprotokoll aus Transkript erstellen
+- list_files: Dateien/Ordner im Projektarchiv auflisten
+- read_file: Datei direkt vom Dateisystem lesen (CSV, TXT, Log)
+- web_search: Im Internet suchen (Normen, Technologie, Nachrichten)
 
 ARBEITSWEISE:
-1. Analysiere die Frage und entscheide welche Tools du brauchst
-2. Für Dokumentenfragen: search_documents → optional read_document
-3. Für Dateisystem-Fragen (zählen, listen, Ordner): list_files oder execute_python
-4. Für Datenanalyse (CSV, Excel, Statistik): execute_python mit pandas
-5. Für Transkripte/Mitschriften → Protokoll: create_protocol
-6. Für Datei-Exploration: list_files zum Browsen, read_file zum Lesen
-7. Für externes Wissen (Normen, Technologie, Nachrichten): web_search
-8. Du kannst mehrere Tools kombinieren und mehrere Schritte machen
-9. Wenn du genug Informationen hast, antworte dem Benutzer
+1. Frage analysieren → passende Tools wählen
+2. Dokumentenfragen: search_documents → DANN read_document für die relevantesten Treffer!
+   Die Suche liefert nur kurze Snippets. Lies das vollständige Dokument um exakte Details zu finden.
+3. Dateisystem (zählen, listen): execute_python oder list_files
+4. Datenanalyse (CSV, Excel): execute_python mit pandas
+5. Transkript → Protokoll: create_protocol (GESAMTEN Text übergeben, nicht kürzen)
+6. Externes Wissen (Normen, Preise, Nachrichten): web_search
+7. Mehrere Tools kombinieren und mehrere Schritte machen
+8. Erst wenn du exakte Fakten aus den Dokumenten hast → Antwort formulieren
 
-ANTWORT-FORMAT:
+ANTWORT-REGELN:
 - Antworte auf Deutsch
-- Starte DIREKT mit Fakten – KEINE Einleitung wie "Basierend auf..."
-- Zitiere jede Aussage mit [Pfad] oder [N]
-- Nutze Aufzählungen und kurze Absätze
-- Sei gründlich und vollständig
-- Bei Code-Ausführungen: zeige die Ergebnisse übersichtlich
+- Starte DIREKT mit Fakten – KEINE Einleitungen ("Basierend auf...", "Gerne...", "Hier sind...")
+- ZITIERE exakte Textpassagen aus den Dokumenten in Anführungszeichen: "exakter Text" [N]
+- Nenne Seitenzahlen, Datumswerte und Kapitelnummern wenn verfügbar
+- Verwende Indikativ, nicht Konjunktiv (schreibe "Der Vertrag regelt..." statt "Der Vertrag könnte regeln...")
+- Kurze Absätze und Aufzählungen statt Fliesstext
+- Sei gründlich, vollständig und KONKRET – keine allgemeinen Aussagen wenn spezifische Details vorliegen
+- Bei Begrüssungen (Hallo, Hi): antworte kurz und freundlich, liste NICHT deine Tools auf
 
-WICHTIG:
-- Nutze die Tools aktiv! Vermute nicht – suche und lies stattdessen.
+VERBOTEN:
+- Erfinde NIEMALS URLs oder Links (kein example.com, kein https://...). Quellen-Links werden automatisch angehängt. Verweise nur mit [Pfad] oder [N].
 - Für Dateisystem-Fragen IMMER execute_python nutzen, NICHT search_documents.
-- Erfinde NIEMALS URLs oder Links (kein example.com, kein https://...). Quellen-Links werden automatisch am Ende angehängt. Verweise auf Dokumente nur mit [Pfad] oder [N].
-- Bei Transkripten den GESAMTEN Text an create_protocol übergeben, nicht kürzen."""
+- Sage NICHT "Ich konnte leider keine Informationen finden" wenn du noch nicht alle Tools versucht hast.
+- Keine Vermutungen oder Spekulationen – wenn du unsicher bist, suche weiter oder sage klar was fehlt."""
 
 # ---------------------------------------------------------------------------
 # Tool Execution
@@ -588,6 +590,7 @@ class ReactAgent:
         
         # Collect sources for linking
         all_sources = []
+        forced_search_done = False  # Track if we did a forced search (to give LLM extra step for read_document)
         
         # --- Forced first step for filesystem queries ---
         fs_code = self._auto_filesystem_code(query)
@@ -669,11 +672,16 @@ class ReactAgent:
                     })
             else:
                 # LLM wants to answer directly (no tool call)
-                if step > 0:
+                if step > 0 and not (step == 1 and forced_search_done):
                     # Already have tool context → stream final answer
                     yield {"type": "phase", "content": "✍️ Erstelle Antwort...\n\n"}
                     async for token in self._llm_stream_final(messages):
                         yield {"type": "token", "content": token}
+                elif step == 1 and forced_search_done:
+                    # After forced search, LLM skipped read_document → give it one more chance
+                    print(f"🔄 Post-forced-search: LLM skipped read_document, continuing for one more step")
+                    forced_search_done = False  # Don't loop again
+                    continue
                 elif step == 0 and not fs_code and self._needs_search(query):
                     # Step 0, no filesystem query, but looks like a document question
                     # → Force a search before answering
@@ -692,7 +700,13 @@ class ReactAgent:
                         "tool_calls": [{"function": {"name": "search_documents", "arguments": {"query": search_query}}}]
                     })
                     messages.append({"role": "tool", "content": search_result})
-                    # Continue loop – LLM will now answer with search context
+                    # Hint: tell LLM to read the best document for details
+                    messages.append({"role": "system", "content": 
+                        "Die Suche hat Treffer gefunden. Die Snippets sind nur Ausschnitte. "
+                        "Nutze read_document um das relevanteste Dokument VOLLSTÄNDIG zu lesen "
+                        "und exakte Details/Zitate zu finden. Antworte NICHT nur mit Snippet-Infos."})
+                    forced_search_done = True
+                    # Continue loop – LLM will now read docs or answer with context
                     continue
                 elif content:
                     # Simple question or model doesn't support tools
