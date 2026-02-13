@@ -1,8 +1,9 @@
 # 🚀 Roadmap Phase 7: Qualität, UX & Erweiterungen
 
-> **Stand:** 2026-02-13 | **Status:** In Arbeit
+> **Stand:** 2026-02-13 | **Status:** Weitgehend abgeschlossen
 > **Ausgangslage:** Phase 6 stabil (ReAct Agent, 7 Tools, Multi-Tenant, File-Upload Protokoll)
 > **Git-Tag Baseline:** `v2026.02.13-phase6-hotfix`
+> **Aktueller Stand:** Auto-Discovery, Model-Management, Prompt-basiertes Tool-Calling, DeepSeek-R1 integriert
 
 ---
 
@@ -127,39 +128,78 @@
 
 ---
 
-## 4. Empfohlene Reihenfolge
+## 4. Empfohlene Reihenfolge (aktualisiert 2026-02-13)
 
-### Sofort (heute Abend)
-1. Web-Search API-Key einrichten (5 Min)
-2. ES neu bauen ohne Fess-Plugins (5 Min)
+### ✅ Erledigt (Phase 7)
+1. ~~Web-Search~~ → SearXNG self-hosted ✅
+2. ~~ES ohne Fess-Plugins~~ ✅
+3. ~~Antwortqualität: System-Prompt Tuning~~ ✅
+4. ~~Fehlertoleranz: Retry + Fehlermeldungen~~ ✅
+5. ~~Modell-Architektur: Auto-Discovery, kein rag- Prefix~~ ✅
+6. ~~DeepSeek-R1: Prompt-basiertes Tool-Calling~~ ✅
 
-### Kurzfristig (nächste Session)
-3. Antwortqualität: System-Prompt Tuning
-4. Fehlertoleranz: Retry + bessere Fehlermeldungen
-5. Quellen-Links: Direkt-Öffnung verbessern
+### Nächste Session (Phase 8a – Retrieval-Qualität)
+7. **Cross-Encoder Reranking** → deutlich bessere Suchergebnisse (1 GB GPU)
+8. **Indexer: Metadaten-Extraktion** → Autor, Datum, Betreff aus E-Mails/Office
+9. **Quellen-Links verbessern** → klickbare Links, PDF-Seitensprung
 
-### Mittelfristig
-6. Whisper-Integration (Audio → Transkript → Protokoll)
-7. Dokumenten-Vergleich
-8. Zusammenfassungs-Modus
-9. Zweiter Mandant aufsetzen
+### Mittelfristig (Phase 8b – Autonomie)
+10. **Whisper-Integration** → Audio-Upload → Transkription → Protokoll (lokal auf GPU)
+11. **Langzeit-Gedächtnis** → Persistenter Notiz-Speicher pro Mandant/Session
+12. **Multi-Dokument-Vergleich** → Diff zwischen Versionen, Änderungstracking
+13. **Zusammenfassungs-Modus** → Ganzes Dokument kapitelweise zusammenfassen
 
-### Langfristig
-10. Monitoring & strukturiertes Logging
-11. Security (API-Keys, Rate-Limiting)
-12. Automatische Reports
+### Langfristig (Phase 9 – Produktionsreife)
+14. Monitoring & strukturiertes Logging (JSON, Request-Tracing)
+15. Security (API-Keys, Rate-Limiting, Audit-Log)
+16. Automatische Reports (Statusberichte, Export als PDF)
+17. Zweiter Mandant aufsetzen + testen
 
 ---
 
 ## 5. Hardware-Potential (DGX Spark)
 
-Die NVIDIA DGX Spark hat 128GB RAM und GPU. Aktuell genutzt:
-- Ollama: ~125GB gesamt (llama4:67GB, deepseek-r1:42GB, gpt-oss:13GB, qwen2.5:3b, apertus:43GB, mxbai-embed)
-- ES: ~2GB
-- ChromaDB + Services: ~4GB
+Die NVIDIA DGX Spark hat 128GB unified RAM (CPU+GPU shared). Aktuell genutzt:
+- Ollama: ~125GB auf Disk (llama4:67GB, deepseek-r1:42GB, gpt-oss:13GB, qwen2.5:3b, apertus:43GB, mxbai-embed)
+- ES: ~2GB RAM
+- ChromaDB + Services: ~4GB RAM
 - **Hinweis**: Nicht alle Modelle gleichzeitig im VRAM – Ollama lädt/entlädt automatisch
 
 Möglichkeiten:
 - **Whisper Large V3**: ~3GB GPU RAM → lokale Transkription
 - **Cross-Encoder Reranking**: ~1GB → bessere Suchergebnisse
 - **Hinweis zu DeepSeek-R1:70b**: Reasoning-Modell mit `<think>`-Phase, ~3 Min/Step, ideal für komplexe Analysen aber langsam
+
+---
+
+## 6. 🔮 Vision: Ausbaustufen zum Autonomen Agent-System
+
+### Stufe 1: Intelligenter Assistent (✅ AKTUELL)
+> *"Frag mich was über deine Dokumente"*
+- ReAct Agent mit 7 Tools, autonome Recherche
+- Hybrid-Suche (ES + ChromaDB), Code-Execution, Web-Suche
+- Prompt-basiertes Tool-Calling für alle Modelltypen
+
+### Stufe 2: Proaktiver Analyst
+> *"Ich erkenne Muster und mache Vorschläge"*
+- **Cross-Encoder Reranking**: Deutlich bessere Trefferqualität
+- **Zusammenfassungen on-demand**: Ganzes Dokument → Executive Summary
+- **Dokumenten-Vergleich**: "Was hat sich geändert zwischen V1 und V2?"
+- **Automatische Klassifikation**: Neue Dokumente werden beim Indexieren kategorisiert
+- **Follow-up-Vorschläge**: Agent schlägt nach Antwort relevante Folgefragen vor
+
+### Stufe 3: Kollaborativer Wissensarbeiter
+> *"Ich merke mir was du brauchst und arbeite über Sessions hinweg"*
+- **Langzeit-Gedächtnis**: Persistenter Speicher pro User/Mandant (wichtige Fakten, Präferenzen)
+- **Whisper-Pipeline**: Audio → Transkription → Protokoll → Pendenzenliste (End-to-End)
+- **Multi-Step-Planung**: Komplexe Aufgaben in Teilschritte zerlegen mit Checkpoints
+- **Report-Generator**: Automatische Statusberichte über mehrere Dokumente/Themen
+- **Benachrichtigungen**: "Neues Dokument indexiert das zu deiner letzten Frage passt"
+
+### Stufe 4: Autonomer Projektassistent
+> *"Ich überwache, analysiere und handle proaktiv"*
+- **Scheduled Tasks**: Regelmässige Reports, Änderungs-Monitoring
+- **Multi-Agent-Architektur**: Spezialisierte Sub-Agenten (Recherche, Analyse, Redaktion)
+- **Workflow-Automation**: Ketten von Aktionen (Index → Analyse → Report → Versand)
+- **Versionierte Wissensbasis**: Änderungshistorie, Rollback, Diff
+- **API-Schnittstelle**: Externe Systeme können den Agent ansprechen (Webhook, REST)
