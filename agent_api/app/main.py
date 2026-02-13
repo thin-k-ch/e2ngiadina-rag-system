@@ -243,17 +243,30 @@ async def ollama_tags():
 
 @app.post("/api/pull")
 async def ollama_pull(request: Request):
-    """Proxy Ollama /api/pull – pull (download) a model. Streams progress."""
+    """Proxy Ollama /api/pull – pull (download) a model. Streams progress.
+    Uses non-streaming request to Ollama to ensure pull completes fully,
+    while streaming progress lines back to the client."""
     import httpx
     body = await request.json()
-    print(f"📥 Model pull request: {body.get('name', '?')}")
+    model_name = body.get('name', '?')
+    print(f"📥 Model pull request: {model_name}")
     
     async def stream_pull():
-        async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0, connect=30.0)) as client:
-            async with client.stream("POST", f"{ollama_base}/api/pull", json=body) as r:
-                async for line in r.aiter_lines():
-                    if line:
-                        yield line + "\n"
+        last_status = ""
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(7200.0, connect=30.0)) as client:
+                async with client.stream("POST", f"{ollama_base}/api/pull", json=body) as r:
+                    async for line in r.aiter_bytes():
+                        decoded = line.decode("utf-8", errors="replace")
+                        for part in decoded.strip().split("\n"):
+                            if part.strip():
+                                last_status = part.strip()
+                                yield part.strip() + "\n"
+            print(f"✅ Model pull completed: {model_name} (last: {last_status[:100]})")
+        except Exception as e:
+            print(f"❌ Model pull error for {model_name}: {type(e).__name__}: {e}")
+            error_msg = json.dumps({"status": f"error: {e}"})
+            yield error_msg + "\n"
     
     return StreamingResponse(stream_pull(), media_type="application/x-ndjson")
 
