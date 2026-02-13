@@ -108,6 +108,67 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "Listet Dateien und Unterordner in einem Verzeichnis auf. "
+                           "Basispfad ist '/data' (= Projektarchiv). Nutze dies um die Ordnerstruktur "
+                           "zu erkunden, bevor du Dateien liest oder analysierst.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Verzeichnispfad relativ zu /data (z.B. 'SBB TFK 2020 PJ - 1 Projekte/14 Werkvertrag')"
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Optionaler Dateifilter (z.B. '*.pdf', '*.eml')"
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Liest den Inhalt einer Datei direkt vom Dateisystem (nicht aus ES-Index). "
+                           "Nutze dies f\u00fcr Dateien die nicht indexiert sind, oder wenn du den "
+                           "exakten Dateiinhalt brauchst (z.B. CSV, TXT, Log-Dateien).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Dateipfad relativ zu /data (z.B. 'SBB TFK 2020 PJ - 1 Projekte/README.md')"
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Sucht im Internet nach aktuellen Informationen. "
+                           "Nutze dies f\u00fcr Fragen die NICHT aus dem Projektarchiv beantwortet werden k\u00f6nnen: "
+                           "aktuelle Normen, Technologien, allgemeines Fachwissen, Preise, Nachrichten.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Suchbegriffe (idealerweise auf Englisch f\u00fcr bessere Ergebnisse)"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -119,19 +180,24 @@ REACT_SYSTEM_PROMPT = """DU BIST EIN AUTONOMER DOKUMENTEN-ANALYST für Schweizer
 FACHBEGRIFFE: FAT=Werksabnahme, SAT=Standortabnahme, TFK=Tunnelfunk, GBT=Gotthard Basistunnel, RBT=Rhomberg Bahntechnik
 
 DU HAST ZUGRIFF AUF TOOLS:
-- search_documents: Durchsucht das Projektarchiv nach Dokumenten
-- read_document: Liest ein Dokument vollständig (Volltext)
+- search_documents: Durchsucht das Projektarchiv (Elasticsearch + ChromaDB) nach Dokumenten
+- read_document: Liest ein Dokument vollständig aus dem Index (Volltext)
 - execute_python: Führt Python-Code aus (Dateien zählen, Datenanalyse, Berechnungen)
 - create_protocol: Erstellt ein Sitzungsprotokoll aus einem Transkript
+- list_files: Listet Dateien/Ordner im Projektarchiv auf (Exploration)
+- read_file: Liest eine Datei direkt vom Dateisystem (CSV, TXT, Log etc.)
+- web_search: Sucht im Internet nach aktuellen Informationen
 
 ARBEITSWEISE:
 1. Analysiere die Frage und entscheide welche Tools du brauchst
 2. Für Dokumentenfragen: search_documents → optional read_document
-3. Für Dateisystem-Fragen (zählen, listen, Ordner): execute_python mit os.walk
+3. Für Dateisystem-Fragen (zählen, listen, Ordner): list_files oder execute_python
 4. Für Datenanalyse (CSV, Excel, Statistik): execute_python mit pandas
 5. Für Transkripte/Mitschriften → Protokoll: create_protocol
-6. Du kannst mehrere Tools kombinieren und mehrere Schritte machen
-7. Wenn du genug Informationen hast, antworte dem Benutzer
+6. Für Datei-Exploration: list_files zum Browsen, read_file zum Lesen
+7. Für externes Wissen (Normen, Technologie, Nachrichten): web_search
+8. Du kannst mehrere Tools kombinieren und mehrere Schritte machen
+9. Wenn du genug Informationen hast, antworte dem Benutzer
 
 ANTWORT-FORMAT:
 - Antworte auf Deutsch
@@ -270,11 +336,164 @@ async def _execute_create_protocol(args: dict) -> str:
     return protocol
 
 
+async def _execute_list_files(args: dict) -> str:
+    """Execute list_files tool – list directory contents via PyRunner"""
+    path = args.get("path", "")
+    pattern = args.get("pattern", "")
+    
+    filter_line = ""
+    if pattern:
+        filter_line = f"\nimport fnmatch\nentries = [e for e in entries if os.path.isdir(os.path.join(full_path, e)) or fnmatch.fnmatch(e, {repr(pattern)})]\n"
+    
+    code = f"""import os
+
+full_path = os.path.join(DATA_ROOT, {repr(path.strip('/'))})
+if not os.path.isdir(full_path):
+    print(f"Verzeichnis nicht gefunden: {{full_path}}")
+    result = "nicht gefunden"
+else:
+    entries = sorted(os.listdir(full_path))
+    {filter_line}
+    dirs = []
+    files = []
+    for e in entries:
+        ep = os.path.join(full_path, e)
+        if os.path.isdir(ep):
+            try:
+                sub_count = len(os.listdir(ep))
+            except:
+                sub_count = 0
+            dirs.append(f"📁 {{e}}/ ({{sub_count}} Einträge)")
+        else:
+            size = os.path.getsize(ep)
+            if size > 1048576:
+                size_str = f"{{size/1048576:.1f}} MB"
+            elif size > 1024:
+                size_str = f"{{size/1024:.0f}} KB"
+            else:
+                size_str = f"{{size}} B"
+            files.append(f"📄 {{e}} ({{size_str}})")
+    
+    print(f"Verzeichnis: {{full_path}}")
+    print(f"{{len(dirs)}} Ordner, {{len(files)}} Dateien")
+    print()
+    for d in dirs[:50]:
+        print(f"  {{d}}")
+    for f in files[:50]:
+        print(f"  {{f}}")
+    if len(dirs) + len(files) > 100:
+        print(f"  ... und {{len(dirs) + len(files) - 100}} weitere")
+    result = f"{{len(dirs)}} Ordner, {{len(files)}} Dateien"
+"""
+    
+    from .code_executor import execute_code, format_execution_result
+    res = await execute_code(code)
+    return format_execution_result(res)
+
+
+async def _execute_read_file(args: dict) -> str:
+    """Execute read_file tool – read file content via PyRunner"""
+    path = args.get("path", "")
+    if not path:
+        return "Fehler: Kein Dateipfad angegeben."
+    
+    code = f"""import os
+
+full_path = os.path.join(DATA_ROOT, {repr(path.strip('/'))})
+if not os.path.isfile(full_path):
+    print(f"Datei nicht gefunden: {{full_path}}")
+    result = None
+else:
+    size = os.path.getsize(full_path)
+    ext = os.path.splitext(full_path)[1].lower()
+    if ext in ('.pdf', '.docx', '.xlsx', '.pptx', '.msg', '.zip', '.jpg', '.png'):
+        print(f"Binärdatei: {{full_path}} ({{size}} bytes, {{ext}})")
+        print("Hinweis: Nutze read_document für indexierte Dokumente oder execute_python für Datenanalyse.")
+        result = f"Binärdatei {{ext}}, {{size}} bytes"
+    else:
+        max_chars = 15000
+        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read(max_chars + 1)
+        truncated = len(content) > max_chars
+        if truncated:
+            content = content[:max_chars]
+        print(f"=== {{os.path.basename(full_path)}} ({{size}} bytes) ===")
+        print(content)
+        if truncated:
+            print(f"\\n[... gekürzt, {{size}} bytes total]")
+        result = f"{{len(content)}} Zeichen gelesen"
+"""
+    
+    from .code_executor import execute_code, format_execution_result
+    res = await execute_code(code, timeout=15)
+    return format_execution_result(res)
+
+
+async def _execute_web_search(args: dict) -> str:
+    """Execute web_search tool – search the web via Brave Search API or fallback"""
+    query = args.get("query", "")
+    if not query:
+        return "Fehler: Kein Suchbegriff angegeben."
+    
+    import httpx
+    
+    brave_key = os.getenv("BRAVE_API_KEY", "")
+    if brave_key:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(
+                    "https://api.search.brave.com/res/v1/web/search",
+                    params={"q": query, "count": 5},
+                    headers={"X-Subscription-Token": brave_key, "Accept": "application/json"}
+                )
+                data = r.json()
+                results = data.get("web", {}).get("results", [])
+                if results:
+                    parts = [f"Web-Suche '{query}': {len(results)} Ergebnisse\n"]
+                    for i, res in enumerate(results, 1):
+                        title = res.get("title", "")
+                        url = res.get("url", "")
+                        desc = res.get("description", "")[:200]
+                        parts.append(f"[{i}] {title}\n    {url}\n    {desc}\n")
+                    return "\n".join(parts)
+        except Exception as e:
+            print(f"⚠️ Brave Search error: {e}")
+    
+    serper_key = os.getenv("SERPER_API_KEY", "")
+    if serper_key:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.post(
+                    "https://google.serper.dev/search",
+                    json={"q": query, "num": 5},
+                    headers={"X-API-KEY": serper_key, "Content-Type": "application/json"}
+                )
+                data = r.json()
+                results = data.get("organic", [])
+                if results:
+                    parts = [f"Web-Suche '{query}': {len(results)} Ergebnisse\n"]
+                    for i, res in enumerate(results, 1):
+                        title = res.get("title", "")
+                        url = res.get("link", "")
+                        desc = res.get("snippet", "")[:200]
+                        parts.append(f"[{i}] {title}\n    {url}\n    {desc}\n")
+                    return "\n".join(parts)
+        except Exception as e:
+            print(f"⚠️ Serper Search error: {e}")
+    
+    return ("Web-Suche nicht verfügbar. Kein BRAVE_API_KEY oder SERPER_API_KEY konfiguriert.\n"
+            "Bitte in docker-compose.yml als Environment-Variable setzen.\n"
+            "Beantworte die Frage basierend auf deinem Trainings-Wissen.")
+
+
 TOOL_EXECUTORS = {
     "search_documents": _execute_search,
     "read_document": _execute_read_document,
     "execute_python": _execute_python,
     "create_protocol": _execute_create_protocol,
+    "list_files": _execute_list_files,
+    "read_file": _execute_read_file,
+    "web_search": _execute_web_search,
 }
 
 # ---------------------------------------------------------------------------
@@ -409,18 +628,33 @@ class ReactAgent:
                     })
             else:
                 # LLM wants to answer directly (no tool call)
-                # If we already have tool context, stream the final answer
                 if step > 0:
-                    # Re-stream: the content from the non-streaming call
-                    # is already the final answer, but we want streaming.
-                    # So we do one more streaming call with the full context.
+                    # Already have tool context → stream final answer
                     yield {"type": "phase", "content": "✍️ Erstelle Antwort...\n\n"}
                     async for token in self._llm_stream_final(messages):
                         yield {"type": "token", "content": token}
+                elif step == 0 and not fs_code and self._needs_search(query):
+                    # Step 0, no filesystem query, but looks like a document question
+                    # → Force a search before answering
+                    search_query = query[:200]
+                    print(f"🔄 Forced search_documents (LLM skipped tools): {search_query[:80]}")
+                    yield {"type": "phase", "content": f"🔍 Suche: *{search_query[:60]}*...\n\n"}
+                    
+                    search_result = await _execute_search({"query": search_query})
+                    search_sources = self._extract_sources(search_result)
+                    all_sources.extend(search_sources)
+                    
+                    # Inject search result into conversation
+                    messages.append({
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{"function": {"name": "search_documents", "arguments": {"query": search_query}}}]
+                    })
+                    messages.append({"role": "tool", "content": search_result})
+                    # Continue loop – LLM will now answer with search context
+                    continue
                 elif content:
-                    # First step, model answered directly (no tools used)
-                    # This happens with models that don't support tool calling
-                    # or for simple questions. Stream the response.
+                    # Simple question or model doesn't support tools
                     yield {"type": "phase", "content": ""}
                     async for token in self._llm_stream_final(messages):
                         yield {"type": "token", "content": token}
@@ -660,6 +894,23 @@ for item in sorted(os.listdir(DATA_ROOT)):
         
         return ""
     
+    def _needs_search(self, query: str) -> bool:
+        """Check if query likely needs document search (vs. pure chat/greeting)"""
+        import re
+        q = query.lower().strip()
+        # Skip search for greetings, simple chat, meta-questions
+        skip_patterns = [
+            r'^(hallo|hi|hey|guten\s*(tag|morgen|abend)|servus|grüezi)\b',
+            r'^(danke|merci|vielen\s*dank)',
+            r'^(wie\s*geht|was\s*kannst\s*du|wer\s*bist\s*du|hilfe|help)',
+            r'^(ja|nein|ok|gut|genau|stimmt|richtig)$',
+        ]
+        for p in skip_patterns:
+            if re.search(p, q):
+                return False
+        # Most queries benefit from search
+        return len(q) > 10
+    
     def _phase_label(self, tool_name: str, args: dict) -> str:
         """Human-readable phase label for UI"""
         if tool_name == "search_documents":
@@ -673,6 +924,15 @@ for item in sorted(os.listdir(DATA_ROOT)):
             return f"⚙️ Code: *{d}*...\n\n"
         elif tool_name == "create_protocol":
             return "📝 Erstelle Protokoll...\n\n"
+        elif tool_name == "list_files":
+            p = args.get("path", "/")[:50]
+            return f"📂 Ordner: *{p}*...\n\n"
+        elif tool_name == "read_file":
+            p = args.get("path", "").split("/")[-1][:50]
+            return f"📄 Lese Datei: *{p}*...\n\n"
+        elif tool_name == "web_search":
+            q = args.get("query", "")[:60]
+            return f"🌐 Web-Suche: *{q}*...\n\n"
         return f"🔧 {tool_name}...\n\n"
     
     def _extract_sources(self, search_result: str) -> list:
