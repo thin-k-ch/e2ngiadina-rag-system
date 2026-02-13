@@ -64,7 +64,6 @@ services:
       - ollama
       - runner
       - elasticsearch
-    restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 60s
 
@@ -126,7 +125,6 @@ services:
     volumes:
       - /media/felix/RAG/1/volumes/logs:/logs
       - /media/felix/RAG/1:/data:ro
-    restart: unless-stopped
 
   elasticsearch:
     user: "1000:1000"

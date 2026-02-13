@@ -639,7 +639,60 @@ Aufgabe: {user_text}"""
                     yield "data: [DONE]\n\n"
                     return
                 
-                # Normal RAG flow
+                # ============================================================
+                # Pfad F: ReAct Agent (autonomous tool-calling loop)
+                # ============================================================
+                # Models that support native tool-calling well
+                REACT_MODELS = {"qwen2.5:72b", "qwen2.5:72b-instruct-q4_K_M", "llama3.3:70b", "llama4:latest"}
+                use_react = selected_model in REACT_MODELS or "react" in model.lower()
+                
+                if use_react:
+                    print(f"🤖 ReAct Agent mode: model={selected_model}")
+                    
+                    # Build chat history
+                    chat_history = []
+                    for m in req.messages[:-1]:
+                        if m.role in ("user", "assistant") and _normalize_content(m.content):
+                            content = _normalize_content(m.content)[:2000]
+                            chat_history.append({"role": m.role, "content": content})
+                    chat_history = chat_history[-6:]
+                    
+                    from .react_agent import ReactAgent
+                    agent = ReactAgent(model=selected_model)
+                    
+                    async for event in agent.run(query=user_text, chat_history=chat_history):
+                        etype = event.get("type")
+                        
+                        if etype == "phase":
+                            yield _sse_chunk(rid, created, model, {"content": event["content"]})
+                        elif etype == "token":
+                            yield _sse_chunk(rid, created, model, {"content": event["content"]})
+                        elif etype == "sources":
+                            src_list = event.get("sources", [])
+                            if src_list:
+                                source_lines = []
+                                for s in src_list:
+                                    n = s.get('n', '?')
+                                    dp = s.get('display_path', s.get('path', ''))
+                                    url = s.get('local_url', '')
+                                    if url:
+                                        source_lines.append(f"[{n}] [{dp}]({url})")
+                                    else:
+                                        source_lines.append(f"[{n}] {dp}")
+                                yield _sse_chunk(rid, created, model, {"content": "\n\nQuellen:\n" + "\n".join(source_lines)})
+                                # Save sources for "Analysiere Quelle [N]" feature
+                                store.save("last_sources", "", "", sources=src_list)
+                        elif etype == "done":
+                            pass
+                    
+                    store.save(conv_id, summary, notes)
+                    yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")
+                    yield "data: [DONE]\n\n"
+                    return
+                
+                # ============================================================
+                # Pfad C: Normal RAG flow (legacy, for non-tool-calling models)
+                # ============================================================
                 # Build per-request config from rag_config if provided
                 run_config = {}
                 if hasattr(req, 'rag_config') and req.rag_config:
@@ -651,9 +704,9 @@ Aufgabe: {user_text}"""
                 # Build conversation history from previous messages (for follow-up context)
                 chat_history = []
                 for m in req.messages[:-1]:  # All messages except the last (current) one
-                    if m.role in ("user", "assistant") and m.content:
+                    if m.role in ("user", "assistant") and _normalize_content(m.content):
                         # Truncate long messages to keep context manageable
-                        content = m.content[:2000] if len(m.content) > 2000 else m.content
+                        content = _normalize_content(m.content)[:2000]
                         chat_history.append({"role": m.role, "content": content})
                 # Keep only last 6 messages (3 turns) to avoid context overflow
                 chat_history = chat_history[-6:]
