@@ -1,6 +1,6 @@
 # 🚀 Roadmap Phase 7: Qualität, UX & Erweiterungen
 
-> **Stand:** 2026-02-13 | **Status:** Entwurf
+> **Stand:** 2026-02-13 | **Status:** In Arbeit
 > **Ausgangslage:** Phase 6 stabil (ReAct Agent, 7 Tools, Multi-Tenant, File-Upload Protokoll)
 > **Git-Tag Baseline:** `v2026.02.13-phase6-hotfix`
 
@@ -26,10 +26,9 @@
 - Fallback-Kette: SearXNG → Brave API → Serper.dev
 - Getestet unter `rag-llama4:latest` ✅
 
-### 2.2 Fess-Plugins aus ES entfernen
-- Dockerfile bereinigt (Plugins auskommentiert), ES-Container muss einmal neu gebaut werden
-- **Aktion:** `docker compose build elasticsearch && docker compose up -d elasticsearch`
-- Keine Datenverluste (esdata-Volume bleibt)
+### 2.2 ~~Fess-Plugins aus ES entfernen~~ ✅ Erledigt
+- ES neu gebaut ohne Plugins (`docker compose build --no-cache elasticsearch`)
+- 0 Plugins installiert, ES läuft sauber (34 Shards, yellow/single-node)
 
 ### 2.3 Zweiter Mandant testen
 - Tenant-System ist gebaut (`tenants/_template.yaml`), aber nur SBB TFK aktiv
@@ -41,17 +40,26 @@
 
 ### Prio 1: Qualität & Stabilität
 
-#### 3.1 Antwortqualität verbessern
-- **System-Prompt Tuning**: LLM-Antworten sind teilweise zu allgemein oder zu vorsichtig
-  - Konkretere Anweisungen: "Zitiere exakte Textpassagen", "Nenne Seitenzahlen wenn verfügbar"
-  - Weniger Konjunktiv, direktere Aussagen
-- **Reranking verbessern**: Aktuell keyword-basiert → ggf. Cross-Encoder Reranking
-- **Context-Qualität**: Snippets besser auswählen (ganze Absätze statt Mitte von Sätzen)
+#### 3.1 ~~Antwortqualität verbessern~~ ✅ Erledigt (System-Prompt)
+- REACT_SYSTEM_PROMPT überarbeitet: Indikativ statt Konjunktiv, exakte Zitate, Seitenzahlen
+- Greeting-Fix: Keine Tool-Liste mehr bei "Hallo"
+- Forced search → read_document Hint: LLM bekommt Extra-Step um Dokumente vollständig zu lesen
+- **Offen:** Reranking (Cross-Encoder), Context-Qualität (ganze Absätze)
 
-#### 3.2 Fehlertoleranz
-- ReAct Agent: Graceful degradation wenn Ollama nicht antwortet
-- Timeout-Handling: User-freundliche Meldung statt Abbruch
-- Retry-Logik für LLM-Calls (1x Retry bei Timeout)
+#### 3.2 ~~Fehlertoleranz~~ ✅ Erledigt
+- `LLMError` Exception + Retry-Logik (1x Retry, +60s Timeout)
+- `_llm_with_tools` und `_llm_stream_final`: Retry bei ReadTimeout, ConnectTimeout, ConnectError
+- User-freundliche Fehlermeldung mit Tipps (Modell wechseln, erneut versuchen)
+
+#### 3.2b ~~Modell-Architektur~~ ✅ Erledigt
+- **Auto-Discovery**: `REACT_MODELS` Whitelist entfernt – ALLE Modelle gehen durch ReAct Agent
+- **Kein `rag-` Prefix mehr**: Modelle erscheinen unter ihrem echten Ollama-Namen
+- **Ollama Proxy**: agent_api proxied `/api/tags`, `/api/pull`, `/api/delete`, `/api/show`, `/api/chat`
+- **OpenWebUI Single-Connection**: Nur noch über agent_api (kein direktes Ollama mehr)
+- **Modell-Management via UI**: Neue Modelle pullen/löschen direkt in OpenWebUI
+- **Embedding-Schutz**: `mxbai-embed-large` kann nicht gelöscht werden (technisch nötig für Vektorsuche)
+- **Aufgeräumte Modelle**: qwen2.5:72b, qwen2.5:14b, llama3.1 entfernt (~100 GB frei)
+- **Aktiver Kern**: llama4 (67GB), gpt-oss (13GB), qwen2.5:3b (1.9GB), apertus:70b (43GB)
 
 #### 3.3 Indexer-Verbesserungen
 - **Inkrementelles Re-Indexing**: Nur geänderte Dateien neu indexieren (Manifest existiert)

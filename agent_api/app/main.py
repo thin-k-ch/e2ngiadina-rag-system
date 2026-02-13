@@ -186,53 +186,224 @@ def health():
 
 @app.get("/v1/models")
 async def models():
-    """List available RAG models (ollama models with rag- prefix)"""
+    """List available models – auto-discovery from Ollama. All models go through ReAct Agent."""
     try:
-        # Fetch models from Ollama
         import httpx
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(f"{ollama_base}/api/tags")
             ollama_models = r.json().get("models", [])
         
-        # Format for OpenAI-compatible response with rag- prefix
         # Skip embedding models (not usable for chat)
-        # Add -think variants for models >= 14B
         skip_keywords = ["embed", "embedding"]
-        think_min_size = 10 * 1e9  # 10GB minimum for thinking mode
         data = []
         for m in ollama_models:
             model_id = m.get("name", m.get("model", ""))
             if any(kw in model_id.lower() for kw in skip_keywords):
                 continue
-            rag_model_id = f"rag-{model_id}"
             data.append({
-                "id": rag_model_id,
+                "id": model_id,
                 "object": "model",
                 "created": 0,
-                "owned_by": "rag-pipeline"
+                "owned_by": "agentic-rag"
             })
-            # Add thinking variant for larger models
-            model_size = m.get("size", 0)
-            if model_size >= think_min_size:
-                data.append({
-                    "id": f"rag-{model_id}-think",
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": "rag-pipeline-think"
-                })
         
         return {"object": "list", "data": data}
     except Exception as e:
-        # Fallback to static list if Ollama unreachable
         return {
             "object": "list",
             "data": [
-                {"id": "rag-llama4:latest", "object": "model", "created": 0, "owned_by": "rag-pipeline"},
-                {"id": "rag-apertus:70b-instruct-2509-q4_k_m", "object": "model", "created": 0, "owned_by": "rag-pipeline"},
-                {"id": "rag-qwen2.5:3b", "object": "model", "created": 0, "owned_by": "rag-pipeline"},
-                {"id": "rag-gpt-oss:latest", "object": "model", "created": 0, "owned_by": "rag-pipeline"},
+                {"id": "llama4:latest", "object": "model", "created": 0, "owned_by": "agentic-rag"},
+                {"id": "gpt-oss:latest", "object": "model", "created": 0, "owned_by": "agentic-rag"},
+                {"id": "qwen2.5:3b", "object": "model", "created": 0, "owned_by": "agentic-rag"},
             ]
         }
+
+# ---------------------------------------------------------------------------
+# Ollama Proxy Endpoints (Model Management for OpenWebUI)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/tags")
+async def ollama_tags():
+    """Proxy Ollama /api/tags – returns available models (OpenWebUI uses this for Ollama connection)"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{ollama_base}/api/tags")
+            data = r.json()
+            # Filter out embedding models from the list
+            if "models" in data:
+                data["models"] = [
+                    m for m in data["models"]
+                    if not any(kw in m.get("name", "").lower() for kw in ["embed", "embedding"])
+                ]
+            return data
+    except Exception as e:
+        print(f"⚠️ Ollama /api/tags error: {e}")
+        return {"models": []}
+
+@app.post("/api/pull")
+async def ollama_pull(request: Request):
+    """Proxy Ollama /api/pull – pull (download) a model. Streams progress."""
+    import httpx
+    body = await request.json()
+    print(f"📥 Model pull request: {body.get('name', '?')}")
+    
+    async def stream_pull():
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3600.0, connect=30.0)) as client:
+            async with client.stream("POST", f"{ollama_base}/api/pull", json=body) as r:
+                async for line in r.aiter_lines():
+                    if line:
+                        yield line + "\n"
+    
+    return StreamingResponse(stream_pull(), media_type="application/x-ndjson")
+
+@app.delete("/api/delete")
+async def ollama_delete(request: Request):
+    """Proxy Ollama /api/delete – delete a model"""
+    import httpx
+    body = await request.json()
+    model_name = body.get("name", "?")
+    
+    # Protect embedding model from deletion
+    if any(kw in model_name.lower() for kw in ["embed", "embedding", "mxbai"]):
+        raise HTTPException(status_code=400, detail="Embedding-Modell kann nicht gelöscht werden (wird für Vektorsuche benötigt)")
+    
+    print(f"🗑️ Model delete request: {model_name}")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.request("DELETE", f"{ollama_base}/api/delete", json=body)
+        if r.status_code == 200:
+            return {"status": "success"}
+        else:
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+
+@app.post("/api/show")
+async def ollama_show(request: Request):
+    """Proxy Ollama /api/show – show model info"""
+    import httpx
+    body = await request.json()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.post(f"{ollama_base}/api/show", json=body)
+        return r.json()
+
+@app.get("/api/version")
+async def ollama_version():
+    """Proxy Ollama /api/version"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{ollama_base}/api/version")
+            return r.json()
+    except:
+        return {"version": "proxy"}
+
+@app.post("/api/chat")
+async def ollama_chat(request: Request, x_tenant_id: str | None = Header(default=None)):
+    """Ollama-format /api/chat – routes through ReAct Agent, streams in Ollama format.
+    This allows OpenWebUI to use agent_api as its sole Ollama connection."""
+    body = await request.json()
+    model_name = body.get("model", "llama4:latest")
+    messages = body.get("messages", [])
+    stream = body.get("stream", True)
+    
+    # Extract user text from last user message
+    user_text = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            content = m.get("content", "")
+            if isinstance(content, list):
+                user_text = " ".join(p.get("text", str(p)) if isinstance(p, dict) else str(p) for p in content)
+            else:
+                user_text = str(content)
+            break
+    
+    if not user_text:
+        return {"model": model_name, "message": {"role": "assistant", "content": "Keine Nachricht erhalten."}, "done": True}
+    
+    selected_model = model_name.replace("rag-", "", 1) if model_name.startswith("rag-") else model_name
+    
+    # Title generation bypass (OpenWebUI sends these)
+    _title_markers = ["create a concise", "3-5 word title", "title for the prompt", "respond only with the title"]
+    if any(marker in user_text.lower() for marker in _title_markers):
+        import httpx
+        async def stream_title():
+            payload = {"model": selected_model, "messages": messages, "stream": True}
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+                async with client.stream("POST", f"{ollama_base}/api/chat", json=payload) as r:
+                    async for line in r.aiter_lines():
+                        if line:
+                            yield line + "\n"
+        return StreamingResponse(stream_title(), media_type="application/x-ndjson")
+    
+    # Route through ReAct Agent
+    tenant = tenant_mgr.get_for_request(x_tenant_id)
+    print(f"🤖 Ollama /api/chat → ReAct: model={selected_model}, tenant={tenant.short_name}")
+    
+    # Build chat history (all messages except last user message)
+    chat_history = []
+    for m in messages[:-1]:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(p.get("text", str(p)) if isinstance(p, dict) else str(p) for p in content)
+        if role in ("user", "assistant") and content:
+            chat_history.append({"role": role, "content": str(content)[:2000]})
+    chat_history = chat_history[-6:]
+    
+    from .react_agent import ReactAgent, LLMError
+    agent_instance = ReactAgent(model=selected_model, tenant=tenant)
+    
+    async def stream_ollama():
+        try:
+            async for event in agent_instance.run(query=user_text, chat_history=chat_history):
+                etype = event.get("type")
+                if etype in ("phase", "token"):
+                    content = event.get("content", "")
+                    if content:
+                        chunk = json.dumps({
+                            "model": model_name,
+                            "message": {"role": "assistant", "content": content},
+                            "done": False
+                        })
+                        yield chunk + "\n"
+                elif etype == "sources":
+                    src_list = event.get("sources", [])
+                    if src_list:
+                        source_lines = []
+                        for s in src_list:
+                            n = s.get('n', '?')
+                            dp = s.get('display_path', s.get('path', ''))
+                            url = s.get('local_url', '')
+                            if url:
+                                source_lines.append(f"[{n}] [{dp}]({url})")
+                            else:
+                                source_lines.append(f"[{n}] {dp}")
+                        src_text = "\n\nQuellen:\n" + "\n".join(source_lines)
+                        chunk = json.dumps({
+                            "model": model_name,
+                            "message": {"role": "assistant", "content": src_text},
+                            "done": False
+                        })
+                        yield chunk + "\n"
+        except LLMError as e:
+            err_msg = f"\n\n⚠️ Fehler: {e}\nBitte erneut versuchen oder schnelleres Modell wählen."
+            yield json.dumps({"model": model_name, "message": {"role": "assistant", "content": err_msg}, "done": False}) + "\n"
+        except Exception as e:
+            err_msg = f"\n\n⚠️ Unerwarteter Fehler: {type(e).__name__}: {e}"
+            yield json.dumps({"model": model_name, "message": {"role": "assistant", "content": err_msg}, "done": False}) + "\n"
+        
+        # Final done message
+        yield json.dumps({"model": model_name, "message": {"role": "assistant", "content": ""}, "done": True}) + "\n"
+    
+    if stream:
+        return StreamingResponse(stream_ollama(), media_type="application/x-ndjson")
+    else:
+        # Non-streaming: collect all output
+        full_text = ""
+        async for event in agent_instance.run(query=user_text, chat_history=chat_history):
+            etype = event.get("type")
+            if etype in ("phase", "token"):
+                full_text += event.get("content", "")
+        return {"model": model_name, "message": {"role": "assistant", "content": full_text}, "done": True}
 
 @app.get("/open")
 async def open_file(path: str):
@@ -409,7 +580,8 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
                     content_str = _normalize_content(raw)
                     print(f"📨 msg[{mi}] role={m.role} type={content_type} len={len(content_str)} preview={content_str[:150]!r}")
                 
-                # MVP: SimpleRAG with selected model (strip rag- prefix and -think suffix)
+                # Model selection: use model name directly (no rag- prefix needed anymore)
+                # Support legacy rag- prefix for backwards compatibility
                 selected_model = model.replace("rag-", "", 1) if model.startswith("rag-") else (model or "llama4:latest")
                 selected_model = selected_model.replace("-think", "")
                 
@@ -693,13 +865,9 @@ Aufgabe: {user_text}"""
                     return
                 
                 # ============================================================
-                # Pfad F: ReAct Agent (autonomous tool-calling loop)
+                # Pfad F: ReAct Agent (all models, autonomous tool-calling)
                 # ============================================================
-                # Models that support native tool-calling well
-                REACT_MODELS = {"qwen2.5:72b", "qwen2.5:72b-instruct-q4_K_M", "llama3.3:70b", "llama4:latest"}
-                use_react = selected_model in REACT_MODELS or "react" in model.lower()
-                
-                if use_react:
+                if True:  # All models go through ReAct Agent
                     # Resolve tenant for this request
                     tenant = tenant_mgr.get_for_request(x_tenant_id)
                     print(f"🤖 ReAct Agent mode: model={selected_model}, tenant={tenant.short_name}")
@@ -746,7 +914,7 @@ Aufgabe: {user_text}"""
                                    f"**Details:** {e}\n\n"
                                    f"**Tipps:**\n"
                                    f"- Versuche es erneut (einfach nochmal senden)\n"
-                                   f"- Wechsle zu einem schnelleren Modell (z.B. `rag-llama4:latest`)\n"
+                                   f"- Wechsle zu einem schnelleren Modell (z.B. `gpt-oss:latest`)\n"
                                    f"- Verkürze die Anfrage\n")
                         yield _sse_chunk(rid, created, model, {"content": err_msg})
                     except Exception as e:

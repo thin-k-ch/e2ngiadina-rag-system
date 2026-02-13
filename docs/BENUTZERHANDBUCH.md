@@ -1,6 +1,6 @@
 # 🔧 Agentic RAG System – Benutzerhandbuch
 
-> **Stand:** 2026-02-13 | **Version:** Phase 6 (ReAct Agent + Multi-Tenant)
+> **Stand:** 2026-02-13 | **Version:** Phase 7 (Auto-Discovery, Model-Management)
 
 ---
 
@@ -8,11 +8,12 @@
 
 ```
 OpenWebUI (Port 8086)
-    ↓ OpenAI-kompatible API (SSE Streaming)
+    ↓ Ollama API Format (Streaming)
 Agent API (Port 11436)  ←→  PyRunner (Port 9000)
     ↓                          ↑ Python-Code Sandbox
     ├→ Elasticsearch (BM25 Keyword-Suche)
-    └→ ChromaDB (Vektor/Semantik-Suche)
+    ├→ ChromaDB (Vektor/Semantik-Suche)
+    └→ SearXNG (Web-Suche, self-hosted)
     ↓
 Ollama (Port 11434) – LLM Inference (GPU)
 ```
@@ -21,28 +22,29 @@ Ollama (Port 11434) – LLM Inference (GPU)
 
 ## 1. Modelle in OpenWebUI
 
-In OpenWebUI gibt es zwei Gruppen von Modellen:
+**Alle Modelle** gehen automatisch durch den ReAct Agent (autonome Tool-Nutzung).
+Kein `rag-` Prefix nötig – Modelle erscheinen unter ihrem echten Ollama-Namen.
 
-| Modell | Typ | Beschreibung |
-|--------|-----|--------------|
-| `rag-llama4:latest` | ReAct | Llama 4 mit autonomer Tool-Nutzung |
-| `rag-qwen2.5:72b` | ReAct | Qwen 72B – bestes Tool-Calling |
-| `rag-llama3.3:70b` | ReAct | Llama 3.3 70B |
-| `rag-gpt-oss:latest` | RAG | GPT-OSS mit klassischer Dokumentensuche |
-| `llama4:latest` | Direkt | Ollama direkt, **OHNE RAG** |
+| Modell | Grösse | Beschreibung |
+|--------|--------|--------------|
+| `llama4:latest` | 67 GB | Grosses Modell, stabil und gründlich |
+| `gpt-oss:latest` | 13 GB | Mittleres Modell, schnell |
+| `qwen2.5:3b` | 1.9 GB | Kleines Modell, sehr schnell für einfache Fragen |
+| `MichelRosselli/apertus:70b-...` | 43 GB | Schweizerdeutsch-Transkription |
 
-### Wichtige Regel:
-- **`rag-*` Modelle** → Die Frage geht durch die RAG-Pipeline (Suche + Dokumente + LLM)
-- **Modelle ohne `rag-`** → Gehen direkt an Ollama, **keine Dokumentensuche!**
+### Modell-Management:
+- **Neue Modelle** können direkt in OpenWebUI unter Settings → Models gepullt werden
+- **Modelle löschen** ebenfalls über OpenWebUI (Embedding-Modell ist geschützt)
+- Jedes neue Modell ist **sofort** für den ReAct Agent verfügbar
 
-### ReAct-Modelle (empfohlen):
-- `rag-llama4:latest`, `rag-qwen2.5:72b`, `rag-llama3.3:70b` nutzen den **ReAct Agent** (Pfad F)
-- Der Agent entscheidet **autonom** welche Tools er braucht: Suchen, Lesen, Code ausführen, etc.
+### ReAct Agent:
+- Der Agent entscheidet **autonom** welche Tools er braucht: Suchen, Lesen, Code ausführen, Web-Suche, etc.
 - Mehrstufige Recherche: Suchen → Dokument lesen → Vertiefen → Antworten
 
-### Thinking Mode (optional):
-- `-think` Suffix (z.B. `rag-gpt-oss:latest-think`) aktiviert einen **Zwei-Schritt-Analysemodus**
-- Nur nützlich für komplexe Analysefragen, wo der Denkprozess sichtbar sein soll
+### Tipps:
+- **Grosses Modell** (llama4) für gründliche Recherchen und komplexe Fragen
+- **Mittleres Modell** (gpt-oss) für schnelle Antworten mit guter Qualität
+- **Kleines Modell** (qwen2.5:3b) für einfache Fragen und schnelle Tests
 
 ---
 
