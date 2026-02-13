@@ -413,6 +413,19 @@ async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = H
                 selected_model = model.replace("rag-", "", 1) if model.startswith("rag-") else (model or "llama4:latest")
                 selected_model = selected_model.replace("-think", "")
                 
+                # Bypass: OpenWebUI title generation prompt → direct to LLM, no RAG
+                _title_markers = ["create a concise", "3-5 word title", "title for the prompt", "respond only with the title"]
+                if any(marker in user_text.lower() for marker in _title_markers):
+                    print(f"⏭️ OpenWebUI title generation bypass")
+                    from .rag_pipeline import SimpleRAGPipeline
+                    pipeline = SimpleRAGPipeline(model=selected_model)
+                    messages = [{"role": m.role, "content": _normalize_content(m.content)} for m in req.messages]
+                    async for chunk in pipeline._llm_stream(messages):
+                        yield _sse_chunk(rid, created, model, {"content": chunk})
+                    yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")
+                    yield "data: [DONE]\n\n"
+                    return
+                
                 # Resolve conversation ID for session state
                 conv_id = x_conversation_id or hashlib.md5(user_text.encode()).hexdigest()[:12]
                 session = store.load(conv_id)
@@ -634,6 +647,12 @@ Aufgabe: {user_text}"""
                         
                         print(f"📝 Inline transcript: {len(transcript_text)} chars, instruction: {instruction[:80]}...")
                     
+                    # Guard: If no real transcript content, skip protocol mode → let ReAct handle it
+                    if not transcript_text or len(transcript_text.strip()) < 200:
+                        print(f"⏭️ Transcript mode skipped: only {len(transcript_text.strip()) if transcript_text else 0} chars, falling through to ReAct")
+                        transcript_mode = None  # Reset so we fall through
+                    
+                if transcript_mode:
                     # Build messages for LLM - NO RAG search, direct processing
                     user_msg = PROTOCOL_USER_TEMPLATE.format(
                         instruction=instruction,
