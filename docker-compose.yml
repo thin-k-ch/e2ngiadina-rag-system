@@ -55,6 +55,7 @@ services:
       - ES_INDEX=rag_files_v1
       - ES_HOST=http://elasticsearch:9200
       - CHROMA_HOST=localhost:8000
+      - SEARXNG_URL=http://searxng:8080
     volumes:
       - /media/felix/RAG/1/volumes/chroma:/chroma
       - /media/felix/RAG/1/volumes/logs:/logs
@@ -196,6 +197,16 @@ services:
     depends_on:
       - agent_api
       - ollama
+    restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: e2ngiadina-searxng
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ./searxng/limiter.toml:/etc/searxng/limiter.toml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080
     restart: unless-stopped
 
 networks:

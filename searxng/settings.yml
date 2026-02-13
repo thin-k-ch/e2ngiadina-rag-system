@@ -1,0 +1,71 @@
+# SearXNG Configuration for Agentic RAG System
+# Optimized for API usage (JSON responses), no public UI needed
+
+use_default_settings: true
+
+general:
+  instance_name: "RAG Web Search"
+  debug: false
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "de"
+  formats:
+    - html
+    - json
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "rag-searxng-secret-key-change-in-production"
+  limiter: false
+  image_proxy: false
+  public_instance: false
+
+ui:
+  static_use_hash: true
+  default_theme: simple
+  results_on_new_tab: false
+
+engines:
+  # Google
+  - name: google
+    engine: google
+    shortcut: g
+    disabled: false
+
+  # Bing
+  - name: bing
+    engine: bing
+    shortcut: b
+    disabled: false
+
+  # DuckDuckGo
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: false
+
+  # Wikipedia (German)
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    disabled: false
+    language: de
+
+  # Disable engines we don't need for RAG
+  - name: brave
+    disabled: true
+  - name: yahoo
+    disabled: true
+  - name: mojeek
+    disabled: true
+
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 15.0
+  useragent_suffix: ""
+  pool_connections: 100
+  pool_maxsize: 20

@@ -433,13 +433,43 @@ else:
 
 
 async def _execute_web_search(args: dict, tenant=None) -> str:
-    """Execute web_search tool – search the web via Brave Search API or fallback"""
+    """Execute web_search tool – SearXNG (self-hosted) → Brave → Serper fallback chain"""
     query = args.get("query", "")
     if not query:
         return "Fehler: Kein Suchbegriff angegeben."
     
     import httpx
     
+    def _format_results(results: list[dict], source: str) -> str:
+        parts = [f"Web-Suche '{query}' ({source}): {len(results)} Ergebnisse\n"]
+        for i, res in enumerate(results, 1):
+            title = res.get("title", "")
+            url = res.get("url", res.get("link", ""))
+            desc = res.get("content", res.get("description", res.get("snippet", "")))[:300]
+            parts.append(f"[{i}] {title}\n    {url}\n    {desc}\n")
+        return "\n".join(parts)
+    
+    # --- Priority 1: SearXNG (self-hosted, no API key needed) ---
+    searxng_url = os.getenv("SEARXNG_URL", "")
+    if searxng_url:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                r = await client.get(
+                    f"{searxng_url}/search",
+                    params={"q": query, "format": "json", "language": "de", "pageno": 1},
+                    headers={"Accept": "application/json"}
+                )
+                data = r.json()
+                results = data.get("results", [])[:8]
+                if results:
+                    print(f"🌐 SearXNG: {len(results)} results for '{query}'")
+                    return _format_results(results, "SearXNG")
+                else:
+                    print(f"⚠️ SearXNG: 0 results for '{query}'")
+        except Exception as e:
+            print(f"⚠️ SearXNG error: {e}")
+    
+    # --- Priority 2: Brave Search API (needs BRAVE_API_KEY) ---
     brave_key = os.getenv("BRAVE_API_KEY", "")
     if brave_key:
         try:
@@ -452,16 +482,11 @@ async def _execute_web_search(args: dict, tenant=None) -> str:
                 data = r.json()
                 results = data.get("web", {}).get("results", [])
                 if results:
-                    parts = [f"Web-Suche '{query}': {len(results)} Ergebnisse\n"]
-                    for i, res in enumerate(results, 1):
-                        title = res.get("title", "")
-                        url = res.get("url", "")
-                        desc = res.get("description", "")[:200]
-                        parts.append(f"[{i}] {title}\n    {url}\n    {desc}\n")
-                    return "\n".join(parts)
+                    return _format_results(results, "Brave")
         except Exception as e:
             print(f"⚠️ Brave Search error: {e}")
     
+    # --- Priority 3: Serper.dev (needs SERPER_API_KEY) ---
     serper_key = os.getenv("SERPER_API_KEY", "")
     if serper_key:
         try:
@@ -474,18 +499,11 @@ async def _execute_web_search(args: dict, tenant=None) -> str:
                 data = r.json()
                 results = data.get("organic", [])
                 if results:
-                    parts = [f"Web-Suche '{query}': {len(results)} Ergebnisse\n"]
-                    for i, res in enumerate(results, 1):
-                        title = res.get("title", "")
-                        url = res.get("link", "")
-                        desc = res.get("snippet", "")[:200]
-                        parts.append(f"[{i}] {title}\n    {url}\n    {desc}\n")
-                    return "\n".join(parts)
+                    return _format_results(results, "Serper")
         except Exception as e:
             print(f"⚠️ Serper Search error: {e}")
     
-    return ("Web-Suche nicht verfügbar. Kein BRAVE_API_KEY oder SERPER_API_KEY konfiguriert.\n"
-            "Bitte in docker-compose.yml als Environment-Variable setzen.\n"
+    return ("Web-Suche nicht verfügbar. Weder SearXNG noch API-Keys konfiguriert.\n"
             "Beantworte die Frage basierend auf deinem Trainings-Wissen.")
 
 
@@ -607,6 +625,11 @@ class ReactAgent:
                             tool_args = json.loads(tool_args)
                         except:
                             tool_args = {"query": tool_args}
+                    
+                    # Fix malformed args from llama4: {"function": "name", "parameters": {...}}
+                    if "parameters" in tool_args and isinstance(tool_args.get("parameters"), dict):
+                        print(f"🔧 Fixing malformed tool args: unwrapping 'parameters'")
+                        tool_args = tool_args["parameters"]
                     
                     print(f"🔧 Tool call: {tool_name}({tool_args})")
                     yield {"type": "phase", "content": self._phase_label(tool_name, tool_args)}
@@ -920,6 +943,16 @@ for item in sorted(os.listdir(DATA_ROOT)):
         ]
         for p in skip_patterns:
             if re.search(p, q):
+                return False
+        # Skip forced doc search when user explicitly wants web search
+        web_patterns = [
+            r'(suche|such)\s*(im\s+)?internet',
+            r'web.?such', r'online\s+such',
+            r'google', r'im\s+netz\b',
+        ]
+        for p in web_patterns:
+            if re.search(p, q):
+                print(f"⏭️ _needs_search=False: explicit web search request")
                 return False
         # Most queries benefit from search
         return len(q) > 10

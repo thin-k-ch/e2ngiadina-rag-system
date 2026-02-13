@@ -173,6 +173,17 @@ RAG_RELEVANCE_THRESHOLD=0.0                    # Alle Chunks senden
 Indexiert Dokumente aus `/media/felix/RAG/1` nach ES + ChromaDB.
 Unterstützte Formate: PDF, DOCX, TXT, MSG, EML, XLSX, PPTX
 
+### 2.8 searxng (Web-Suche)
+| Parameter | Wert |
+|-----------|------|
+| **Image** | `searxng/searxng:latest` |
+| **Port** | 8080 (intern) |
+| **Config** | `./searxng/settings.yml` + `limiter.toml` |
+
+Self-hosted Meta-Suchmaschine für den `web_search` Tool des ReAct Agents.
+Aggregiert Ergebnisse von Google, Bing, DuckDuckGo, Wikipedia (kein API-Key nötig).
+Fallback-Kette: SearXNG → Brave API → Serper.dev
+
 ---
 
 ## 3. Agent API – Dateistruktur

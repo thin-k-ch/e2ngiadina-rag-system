@@ -271,7 +271,7 @@ xlsx, xls, pptx, ppt
 ## 6. Grenzen des Systems
 
 - **Kein Schreiben/Ändern** von Dateien (nur read-only)
-- **Web-Suche** nur mit API-Key (BRAVE_API_KEY oder SERPER_API_KEY in docker-compose.yml)
+- **Web-Suche** via SearXNG (self-hosted, kein API-Key nötig). Optional: Brave/Serper als Fallback
 - **Keine Bild/Scan-Analyse** (nur Text-Extrakt aus PDFs)
 - **Kein Chat-übergreifendes Gedächtnis** – jeder Chat ist eine eigene Session
 - **Max ~12'000 Zeichen** pro Dokument im Kontext (wird gekürzt bei RAG-Pfad)
