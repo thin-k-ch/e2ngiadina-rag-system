@@ -129,7 +129,9 @@ services:
 
   elasticsearch:
     user: "1000:1000"
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.2
+    build:
+      context: ./elasticsearch
+      dockerfile: Dockerfile
     container_name: agentic-elasticsearch
     environment:
       - discovery.type=single-node
