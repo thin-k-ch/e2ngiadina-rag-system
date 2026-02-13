@@ -61,6 +61,53 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_python",
+            "description": "Führt Python-Code in einer Sandbox aus. Nutze dies für: "
+                           "Dateien zählen/auflisten, Datenanalyse (CSV/Excel), Berechnungen, "
+                           "Statistiken. Verfügbare Bibliotheken: pandas, tabulate, csv, os, json. "
+                           "Dateien liegen unter DATA_ROOT='/data'. Nutze print() für Ausgaben.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python-Code zur Ausführung. Nutze print() und setze result='...' für das Hauptergebnis."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Kurze Beschreibung was der Code tut"
+                    }
+                },
+                "required": ["code"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_protocol",
+            "description": "Erstellt ein strukturiertes Sitzungsprotokoll aus einem Transkript oder Gesprächstext. "
+                           "Nutze dies wenn der Benutzer ein Transkript, eine Mitschrift oder einen "
+                           "Besprechungstext in ein professionelles Protokoll umwandeln möchte.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "transcript": {
+                        "type": "string",
+                        "description": "Der Transkript-/Gesprächstext"
+                    },
+                    "instruction": {
+                        "type": "string",
+                        "description": "Zusätzliche Anweisungen (z.B. 'Fokus auf Pendenzen', 'Englisches Protokoll')"
+                    }
+                },
+                "required": ["transcript"]
+            }
+        }
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -74,13 +121,17 @@ FACHBEGRIFFE: FAT=Werksabnahme, SAT=Standortabnahme, TFK=Tunnelfunk, GBT=Gotthar
 DU HAST ZUGRIFF AUF TOOLS:
 - search_documents: Durchsucht das Projektarchiv nach Dokumenten
 - read_document: Liest ein Dokument vollständig (Volltext)
+- execute_python: Führt Python-Code aus (Dateien zählen, Datenanalyse, Berechnungen)
+- create_protocol: Erstellt ein Sitzungsprotokoll aus einem Transkript
 
 ARBEITSWEISE:
 1. Analysiere die Frage und entscheide welche Tools du brauchst
-2. Suche zuerst mit search_documents nach relevanten Dokumenten
-3. Wenn nötig, lies einzelne Dokumente mit read_document im Detail
-4. Du kannst mehrere Suchen durchführen um verschiedene Aspekte abzudecken
-5. Wenn du genug Informationen hast, antworte dem Benutzer
+2. Für Dokumentenfragen: search_documents → optional read_document
+3. Für Dateisystem-Fragen (zählen, listen, Ordner): execute_python mit os.walk
+4. Für Datenanalyse (CSV, Excel, Statistik): execute_python mit pandas
+5. Für Transkripte/Mitschriften → Protokoll: create_protocol
+6. Du kannst mehrere Tools kombinieren und mehrere Schritte machen
+7. Wenn du genug Informationen hast, antworte dem Benutzer
 
 ANTWORT-FORMAT:
 - Antworte auf Deutsch
@@ -88,8 +139,12 @@ ANTWORT-FORMAT:
 - Zitiere jede Aussage mit [Pfad] oder [N]
 - Nutze Aufzählungen und kurze Absätze
 - Sei gründlich und vollständig
+- Bei Code-Ausführungen: zeige die Ergebnisse übersichtlich
 
-WICHTIG: Nutze die Tools aktiv! Vermute nicht – suche und lies stattdessen."""
+WICHTIG:
+- Nutze die Tools aktiv! Vermute nicht – suche und lies stattdessen.
+- Für Dateisystem-Fragen IMMER execute_python nutzen, NICHT search_documents.
+- Bei Transkripten den GESAMTEN Text an create_protocol übergeben, nicht kürzen."""
 
 # ---------------------------------------------------------------------------
 # Tool Execution
@@ -164,9 +219,62 @@ async def _execute_read_document(args: dict) -> str:
     return f"=== {path} ===\n{content}"
 
 
+async def _execute_python(args: dict) -> str:
+    """Execute execute_python tool"""
+    code = args.get("code", "")
+    desc = args.get("description", "")
+    if not code:
+        return "Fehler: Kein Code angegeben."
+    
+    from .code_executor import execute_code, format_execution_result
+    
+    print(f"⚙️ execute_python: {desc or code[:80]}...")
+    result = await execute_code(code)
+    formatted = format_execution_result(result)
+    
+    return f"Code-Ergebnis ({desc}):\n{formatted}" if desc else f"Code-Ergebnis:\n{formatted}"
+
+
+async def _execute_create_protocol(args: dict) -> str:
+    """Execute create_protocol tool – streams protocol via LLM"""
+    transcript = args.get("transcript", "")
+    instruction = args.get("instruction", "Erstelle ein vollständiges Protokoll mit Pendenzenliste.")
+    
+    if not transcript:
+        return "Fehler: Kein Transkript angegeben."
+    
+    from .transcript_processor import preprocess_transcript, PROTOCOL_SYSTEM_PROMPT, PROTOCOL_USER_TEMPLATE
+    from .rag_pipeline import SimpleRAGPipeline
+    
+    # Preprocess
+    transcript = preprocess_transcript(transcript)
+    
+    # Build LLM messages
+    user_msg = PROTOCOL_USER_TEMPLATE.format(
+        instruction=instruction,
+        transcript=transcript
+    )
+    
+    messages = [
+        {"role": "system", "content": PROTOCOL_SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg}
+    ]
+    
+    # Use non-streaming LLM call (result goes back into the ReAct loop)
+    model = os.getenv("OLLAMA_MODEL_ANSWER", "llama4:latest")
+    pipeline = SimpleRAGPipeline(model=model)
+    
+    print(f"📝 create_protocol: {len(transcript)} chars transcript, instruction: {instruction[:80]}")
+    protocol = await pipeline._llm_complete(messages)
+    
+    return protocol
+
+
 TOOL_EXECUTORS = {
     "search_documents": _execute_search,
     "read_document": _execute_read_document,
+    "execute_python": _execute_python,
+    "create_protocol": _execute_create_protocol,
 }
 
 # ---------------------------------------------------------------------------
@@ -209,6 +317,12 @@ class ReactAgent:
         if system_prompt_extra:
             system_content += "\n\n" + system_prompt_extra
         
+        # Query analysis: inject tool hints for specific query types
+        tool_hint = self._analyze_query(query)
+        if tool_hint:
+            system_content += f"\n\nHINWEIS ZUR AKTUELLEN ANFRAGE: {tool_hint}"
+            print(f"💡 Tool hint: {tool_hint}")
+        
         messages = [{"role": "system", "content": system_content}]
         
         # Add chat history (last 3 turns)
@@ -219,6 +333,24 @@ class ReactAgent:
         
         # Collect sources for linking
         all_sources = []
+        
+        # --- Forced first step for filesystem queries ---
+        fs_code = self._auto_filesystem_code(query)
+        if fs_code:
+            print(f"📂 Forced execute_python for filesystem query")
+            yield {"type": "phase", "content": "⚙️ Dateisystem-Analyse...\n\n"}
+            yield {"type": "tool_call", "name": "execute_python", "args": {"code": fs_code}}
+            
+            result = await _execute_python({"code": fs_code, "description": "Dateisystem-Analyse"})
+            yield {"type": "tool_result", "name": "execute_python", "summary": f"{len(result)} Zeichen"}
+            
+            # Inject result into conversation for the LLM to summarize
+            messages.append({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "execute_python", "arguments": {"code": fs_code}}}]
+            })
+            messages.append({"role": "tool", "content": result})
         
         # --- ReAct Loop: non-streaming tool steps ---
         for step in range(max_steps):
@@ -403,6 +535,131 @@ class ReactAgent:
     # Helpers
     # ------------------------------------------------------------------
     
+    def _auto_filesystem_code(self, query: str) -> str:
+        """Generate Python code for filesystem queries. Returns empty string if not a fs query."""
+        import re
+        q = query.lower()
+        
+        # Detect file extension from query
+        ext_match = re.search(r'\.(pdf|eml|docx|doc|msg|xlsx|xls|pptx|txt|md)', q)
+        ext = ext_match.group(1) if ext_match else None
+        
+        # Count files queries
+        if re.search(r'(?:wie\s*viele|anzahl|zähl|count)\s+.*?(?:dateien|files|dokumente|mails|pdf|eml|docx|msg)', q):
+            ext_filter = f"f.lower().endswith('.{ext}')" if ext else "True"
+            ext_label = f".{ext}" if ext else ""
+            return f"""import os
+from collections import Counter
+
+counts = Counter()
+total = 0
+for root, dirs, files in os.walk(DATA_ROOT):
+    for f in files:
+        if {ext_filter}:
+            rel = os.path.relpath(root, DATA_ROOT)
+            # Top-level folder only
+            top = rel.split(os.sep)[0] if os.sep in rel else rel
+            counts[top] += 1
+            total += 1
+
+print(f"Gesamt: {{total}} {ext_label}-Dateien im Projektarchiv")
+print()
+print("Pro Hauptordner:")
+for folder, n in counts.most_common(20):
+    print(f"  {{folder}}: {{n}}")
+result = f"{{total}} {ext_label}-Dateien gefunden"
+"""
+        
+        # List files queries
+        if re.search(r'(?:liste|zeige|finde|suche)\s+(?:alle|sämtliche)\s+.*?(?:dateien|files)', q):
+            ext_filter = f"f.lower().endswith('.{ext}')" if ext else "True"
+            return f"""import os
+
+files_found = []
+for root, dirs, files in os.walk(DATA_ROOT):
+    for f in files:
+        if {ext_filter}:
+            rel = os.path.relpath(os.path.join(root, f), DATA_ROOT)
+            files_found.append(rel)
+
+files_found.sort()
+print(f"Gefunden: {{len(files_found)}} Dateien")
+print()
+for fp in files_found[:100]:
+    print(f"  {{fp}}")
+if len(files_found) > 100:
+    print(f"  ... und {{len(files_found) - 100}} weitere")
+result = f"{{len(files_found)}} Dateien gefunden"
+"""
+        
+        # Directory structure queries
+        if re.search(r'(?:ordnerstruktur|verzeichnisstruktur|dateistruktur|welche.*ordner|welche.*verzeichnisse)', q):
+            return """import os
+
+print("Ordnerstruktur (Ebene 1+2):")
+print()
+for item in sorted(os.listdir(DATA_ROOT)):
+    path = os.path.join(DATA_ROOT, item)
+    if os.path.isdir(path):
+        sub_count = len(os.listdir(path))
+        print(f"📁 {item}/ ({sub_count} Einträge)")
+        for sub in sorted(os.listdir(path))[:10]:
+            sub_path = os.path.join(path, sub)
+            if os.path.isdir(sub_path):
+                print(f"   📁 {sub}/")
+            else:
+                print(f"   📄 {sub}")
+        if sub_count > 10:
+            print(f"   ... und {sub_count - 10} weitere")
+"""
+        
+        return ""
+    
+    def _analyze_query(self, query: str) -> str:
+        """Analyze query and return tool hint if a specific tool is clearly needed"""
+        import re
+        q = query.lower()
+        
+        # Filesystem queries → execute_python
+        fs_patterns = [
+            r'(?:wie\s*viele|anzahl|zähl|count)\s+.*?(?:dateien|files|dokumente|mails|eml|pdf|docx|msg)',
+            r'(?:liste|zeige|finde|suche)\s+(?:alle|sämtliche)\s+.*?(?:dateien|files)',
+            r'(?:welche|was für)\s+(?:dateien|ordner|verzeichnisse)',
+            r'(?:ordnerstruktur|verzeichnisstruktur|dateistruktur)',
+            r'(?:gibt\s*es|existieren)\s+.*?(?:\.eml|\.pdf|\.docx|\.msg|\.xlsx)',
+            r'(?:pro\s+ordner|pro\s+unterordner|pro\s+verzeichnis)',
+        ]
+        for p in fs_patterns:
+            if re.search(p, q):
+                return ("Diese Frage erfordert eine Dateisystem-Analyse. "
+                        "Nutze execute_python mit os.walk(DATA_ROOT) wobei DATA_ROOT='/data'. "
+                        "search_documents zeigt NUR indizierte Treffer, NICHT alle Dateien!")
+        
+        # Data analysis → execute_python
+        data_patterns = [
+            r'(?:berechn|statistik|durchschnitt|summe|mittelwert)',
+            r'(?:csv|excel|xlsx)\s+.*?(?:analys|auswert|einles)',
+            r'(?:analys|auswert)\s+.*?(?:csv|excel|xlsx|daten)',
+        ]
+        for p in data_patterns:
+            if re.search(p, q):
+                return ("Diese Frage erfordert Datenanalyse. "
+                        "Nutze execute_python mit pandas. Dateien liegen unter DATA_ROOT='/data'.")
+        
+        # Transcript/Protocol → create_protocol
+        # Only if long text is included (>500 chars after instruction)
+        proto_patterns = [
+            r'(?:erstell|schreib|mach|generier)\w*\s+.*?(?:protokoll|niederschrift)',
+            r'transkript\w*\s+.*?(?:protokoll|aufbereite|verarbeit)',
+        ]
+        if len(query) > 500:
+            for p in proto_patterns:
+                if re.search(p, q):
+                    return ("Der Benutzer möchte ein Protokoll aus einem Transkript erstellen. "
+                            "Nutze create_protocol mit dem GESAMTEN Text als transcript-Parameter.")
+        
+        return ""
+    
     def _phase_label(self, tool_name: str, args: dict) -> str:
         """Human-readable phase label for UI"""
         if tool_name == "search_documents":
@@ -411,6 +668,11 @@ class ReactAgent:
         elif tool_name == "read_document":
             p = args.get("path", "").split("/")[-1][:50]
             return f"📄 Lese: *{p}*...\n\n"
+        elif tool_name == "execute_python":
+            d = args.get("description", "Code")[:50]
+            return f"⚙️ Code: *{d}*...\n\n"
+        elif tool_name == "create_protocol":
+            return "📝 Erstelle Protokoll...\n\n"
         return f"🔧 {tool_name}...\n\n"
     
     def _extract_sources(self, search_result: str) -> list:
