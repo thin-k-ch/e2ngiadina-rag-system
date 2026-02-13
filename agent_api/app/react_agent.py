@@ -528,6 +528,28 @@ TOOL_EXECUTORS = {
 # ReAct Agent
 # ---------------------------------------------------------------------------
 
+# Module-level cache: models that returned 400 on native tool-calling.
+# Persists across requests (ReactAgent instances are per-request).
+# Pre-seeded with known reasoning models without native tool support.
+_PROMPT_TOOLS_MODELS: set[str] = set()
+_PROMPT_TOOLS_PREFIXES = ["deepseek-r1", "deepseek-r2", "qwq", "phi4-reasoning"]
+
+
+def _needs_prompt_tools(model: str) -> bool:
+    """Check if model needs prompt-based tool calling (cached or known prefix)."""
+    if model in _PROMPT_TOOLS_MODELS:
+        return True
+    model_base = model.split(":")[0].lower()
+    return any(prefix in model_base for prefix in _PROMPT_TOOLS_PREFIXES)
+
+
+def _mark_prompt_tools(model: str):
+    """Cache a model as needing prompt-based tool calling."""
+    if model not in _PROMPT_TOOLS_MODELS:
+        _PROMPT_TOOLS_MODELS.add(model)
+        print(f"💾 Cached {model} as prompt-tools model (will skip native tools on future requests)")
+
+
 class ReactAgent:
     """
     Autonomous agent with tool-calling loop.
@@ -541,11 +563,8 @@ class ReactAgent:
         self.ollama_base = (ollama_base or os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")).rstrip("/")
         self.max_steps = 6
         self.tenant = tenant  # TenantConfig or None
-        # Models that don't support native tool-calling use prompt-based fallback
-        # Pre-detect known reasoning models without native tool support
-        _NO_NATIVE_TOOLS = ["deepseek-r1", "deepseek-r2", "qwq", "phi4-reasoning"]
-        model_base = self.model.split(":")[0].lower()
-        self._use_prompt_tools = any(nt in model_base for nt in _NO_NATIVE_TOOLS)
+        # Check module-level cache + known prefixes for prompt-based tool calling
+        self._use_prompt_tools = _needs_prompt_tools(self.model)
         if self._use_prompt_tools:
             print(f"🧠 Model {self.model}: using prompt-based tool calling (no native tools)")
     
@@ -836,6 +855,7 @@ class ReactAgent:
                     # Model doesn't support native tool-calling → switch to prompt-based
                     print(f"⚠️ Model {self.model} returned 400 with tools → switching to prompt-based tool calling")
                     self._use_prompt_tools = True
+                    _mark_prompt_tools(self.model)  # Cache for future requests
                     return await self._llm_with_prompt_tools(messages, num_ctx, total_chars)
                 raise LLMError(f"HTTP {e.response.status_code}: {e}")
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadError) as e:
