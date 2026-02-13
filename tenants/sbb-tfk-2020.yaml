@@ -1,0 +1,57 @@
+# =============================================================================
+# Mandant: SBB TFK 2020 – Tunnelfunk
+# =============================================================================
+# Dies ist die Standard-Konfiguration für das aktuelle Projekt.
+# Neue Mandanten: Datei kopieren und anpassen.
+
+name: "SBB TFK 2020 – Tunnelfunk"
+short_name: "sbb-tfk"
+
+# Pfade (Host-Pfade, werden in Docker gemountet)
+document_root: "/media/felix/RAG/1"
+
+# Elasticsearch
+es_index: "rag_files_v1"
+
+# ChromaDB Collection-Prefix
+# Erzeugt Collections: documents, documents_docx, documents_txt, documents_msg, documents_mail
+chroma_prefix: "documents"
+
+# Domain-spezifischer System-Prompt (wird an ReAct-Prompt angehängt)
+system_prompt_extra: |
+  Du bist Spezialist für Schweizer Eisenbahn-Projekte (SBB TFK 2020 - Tunnelfunk).
+  Fachgebiete: Projektleitung, Funktechnik, Tunnelfunk, Polycom, FRMCS.
+  Kontext: Rhomberg Bahntechnik (RBT) als Lieferant, SBB als Auftraggeber.
+
+# Glossar / Fachbegriffe (für System-Prompt und Suche)
+glossary:
+  GBT: "Gotthard Basistunnel"
+  TFK: "Tunnelfunk"
+  RBT: "Rhomberg Bahntechnik"
+  FAT: "Werksabnahme (Factory Acceptance Test)"
+  SAT: "Standortabnahme (Site Acceptance Test)"
+  RSRG: "Remote Station Radio Gateway"
+  FRMCS: "Future Railway Mobile Communication System"
+
+# Whisper Transkript Auto-Korrekturen (falsch → richtig)
+transcript_corrections:
+  Adnova: "Atnova"
+  Reticum: "Rhäticom"
+  Reggiecom: "Rhäticom"
+  Eppenberg: "Dettenberg"
+  Solid: "SOLiD"
+  "Air Scale": "AirScale"
+
+# Datei-Erweiterungen für ES-Suche
+ext_filter:
+  - pdf
+  - docx
+  - doc
+  - msg
+  - eml
+  - xlsx
+  - xls
+  - pptx
+  - ppt
+  - txt
+  - md

@@ -13,6 +13,7 @@ from .agent_orchestrator import Agent, AgentOrchestrator
 from .rag_pipeline import SimpleRAGPipeline
 from .state import StateStore
 from .es_proxy import router as es_router
+from .tenant_manager import get_tenant_manager
 
 app = FastAPI(title="AGENTIC RAG API")
 
@@ -24,6 +25,9 @@ orchestrator = AgentOrchestrator()
 
 # MVP: Simple RAG pipeline (Query → Search → Snippets → LLM)
 simple_rag = SimpleRAGPipeline()
+
+# Tenant Manager (Mandantenfähigkeit)
+tenant_mgr = get_tenant_manager()
 
 ENABLE_DEBUG_ENDPOINTS = os.getenv("ENABLE_DEBUG_ENDPOINTS", "0") == "1"
 
@@ -244,6 +248,20 @@ async def open_file(path: str):
 
     return FileResponse(normalized_path)
 
+@app.get("/tenants")
+async def list_tenants():
+    """List all available tenants and which one is active"""
+    return {"tenants": tenant_mgr.list_tenants()}
+
+@app.post("/tenants/switch/{short_name}")
+async def switch_tenant(short_name: str):
+    """Switch the active tenant"""
+    if tenant_mgr.set_active(short_name):
+        t = tenant_mgr.active
+        return {"status": "ok", "active": t.short_name, "name": t.name}
+    available = [t["short_name"] for t in tenant_mgr.list_tenants()]
+    raise HTTPException(404, f"Mandant '{short_name}' nicht gefunden. Verfügbar: {available}")
+
 async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = None):
     if not req.messages:
         return {"error": "No messages provided"}
@@ -371,7 +389,7 @@ async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = Non
         return response
 
 @app.post("/v1/chat/completions")
-async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = Header(default=None)):
+async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = Header(default=None), x_tenant_id: str | None = Header(default=None)):
     rid = f"agentic_{int(time.time())}"
     created = int(time.time())
     model = req.model or "agentic-rag"
@@ -639,7 +657,62 @@ Aufgabe: {user_text}"""
                     yield "data: [DONE]\n\n"
                     return
                 
-                # Normal RAG flow
+                # ============================================================
+                # Pfad F: ReAct Agent (autonomous tool-calling loop)
+                # ============================================================
+                # Models that support native tool-calling well
+                REACT_MODELS = {"qwen2.5:72b", "qwen2.5:72b-instruct-q4_K_M", "llama3.3:70b", "llama4:latest"}
+                use_react = selected_model in REACT_MODELS or "react" in model.lower()
+                
+                if use_react:
+                    # Resolve tenant for this request
+                    tenant = tenant_mgr.get_for_request(x_tenant_id)
+                    print(f"🤖 ReAct Agent mode: model={selected_model}, tenant={tenant.short_name}")
+                    
+                    # Build chat history
+                    chat_history = []
+                    for m in req.messages[:-1]:
+                        if m.role in ("user", "assistant") and _normalize_content(m.content):
+                            content = _normalize_content(m.content)[:2000]
+                            chat_history.append({"role": m.role, "content": content})
+                    chat_history = chat_history[-6:]
+                    
+                    from .react_agent import ReactAgent
+                    agent = ReactAgent(model=selected_model, tenant=tenant)
+                    
+                    async for event in agent.run(query=user_text, chat_history=chat_history):
+                        etype = event.get("type")
+                        
+                        if etype == "phase":
+                            yield _sse_chunk(rid, created, model, {"content": event["content"]})
+                        elif etype == "token":
+                            yield _sse_chunk(rid, created, model, {"content": event["content"]})
+                        elif etype == "sources":
+                            src_list = event.get("sources", [])
+                            if src_list:
+                                source_lines = []
+                                for s in src_list:
+                                    n = s.get('n', '?')
+                                    dp = s.get('display_path', s.get('path', ''))
+                                    url = s.get('local_url', '')
+                                    if url:
+                                        source_lines.append(f"[{n}] [{dp}]({url})")
+                                    else:
+                                        source_lines.append(f"[{n}] {dp}")
+                                yield _sse_chunk(rid, created, model, {"content": "\n\nQuellen:\n" + "\n".join(source_lines)})
+                                # Save sources for "Analysiere Quelle [N]" feature
+                                store.save("last_sources", "", "", sources=src_list)
+                        elif etype == "done":
+                            pass
+                    
+                    store.save(conv_id, summary, notes)
+                    yield _sse_chunk(rid, created, model, {"content": ""}, finish_reason="stop")
+                    yield "data: [DONE]\n\n"
+                    return
+                
+                # ============================================================
+                # Pfad C: Normal RAG flow (legacy, for non-tool-calling models)
+                # ============================================================
                 # Build per-request config from rag_config if provided
                 run_config = {}
                 if hasattr(req, 'rag_config') and req.rag_config:
@@ -651,9 +724,9 @@ Aufgabe: {user_text}"""
                 # Build conversation history from previous messages (for follow-up context)
                 chat_history = []
                 for m in req.messages[:-1]:  # All messages except the last (current) one
-                    if m.role in ("user", "assistant") and m.content:
+                    if m.role in ("user", "assistant") and _normalize_content(m.content):
                         # Truncate long messages to keep context manageable
-                        content = m.content[:2000] if len(m.content) > 2000 else m.content
+                        content = _normalize_content(m.content)[:2000]
                         chat_history.append({"role": m.role, "content": content})
                 # Keep only last 6 messages (3 turns) to avoid context overflow
                 chat_history = chat_history[-6:]
