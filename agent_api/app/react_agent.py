@@ -216,7 +216,7 @@ WICHTIG:
 # Tool Execution
 # ---------------------------------------------------------------------------
 
-async def _execute_search(args: dict) -> str:
+async def _execute_search(args: dict, tenant=None) -> str:
     """Execute search_documents tool"""
     query = args.get("query", "")
     if not query:
@@ -225,6 +225,8 @@ async def _execute_search(args: dict) -> str:
     from .tools import Tools
     from .rag_pipeline import SimpleRAGPipeline
     
+    # Use tenant-specific ES index if available
+    es_index = tenant.es_index if tenant else os.getenv("ES_INDEX", "rag_files_v1")
     tools = Tools()
     pipeline = SimpleRAGPipeline()
     
@@ -264,7 +266,7 @@ async def _execute_search(args: dict) -> str:
     return "\n".join(parts)
 
 
-async def _execute_read_document(args: dict) -> str:
+async def _execute_read_document(args: dict, tenant=None) -> str:
     """Execute read_document tool"""
     path = args.get("path", "")
     if not path:
@@ -285,7 +287,7 @@ async def _execute_read_document(args: dict) -> str:
     return f"=== {path} ===\n{content}"
 
 
-async def _execute_python(args: dict) -> str:
+async def _execute_python(args: dict, tenant=None) -> str:
     """Execute execute_python tool"""
     code = args.get("code", "")
     desc = args.get("description", "")
@@ -301,7 +303,7 @@ async def _execute_python(args: dict) -> str:
     return f"Code-Ergebnis ({desc}):\n{formatted}" if desc else f"Code-Ergebnis:\n{formatted}"
 
 
-async def _execute_create_protocol(args: dict) -> str:
+async def _execute_create_protocol(args: dict, tenant=None) -> str:
     """Execute create_protocol tool – streams protocol via LLM"""
     transcript = args.get("transcript", "")
     instruction = args.get("instruction", "Erstelle ein vollständiges Protokoll mit Pendenzenliste.")
@@ -336,7 +338,7 @@ async def _execute_create_protocol(args: dict) -> str:
     return protocol
 
 
-async def _execute_list_files(args: dict) -> str:
+async def _execute_list_files(args: dict, tenant=None) -> str:
     """Execute list_files tool – list directory contents via PyRunner"""
     path = args.get("path", "")
     pattern = args.get("pattern", "")
@@ -391,7 +393,7 @@ else:
     return format_execution_result(res)
 
 
-async def _execute_read_file(args: dict) -> str:
+async def _execute_read_file(args: dict, tenant=None) -> str:
     """Execute read_file tool – read file content via PyRunner"""
     path = args.get("path", "")
     if not path:
@@ -429,7 +431,7 @@ else:
     return format_execution_result(res)
 
 
-async def _execute_web_search(args: dict) -> str:
+async def _execute_web_search(args: dict, tenant=None) -> str:
     """Execute web_search tool – search the web via Brave Search API or fallback"""
     query = args.get("query", "")
     if not query:
@@ -508,10 +510,11 @@ class ReactAgent:
     direct answer if model doesn't support tool calling.
     """
     
-    def __init__(self, model: str = None, ollama_base: str = None):
+    def __init__(self, model: str = None, ollama_base: str = None, tenant=None):
         self.model = model or os.getenv("OLLAMA_MODEL_ANSWER", "llama4:latest")
         self.ollama_base = (ollama_base or os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")).rstrip("/")
         self.max_steps = 6
+        self.tenant = tenant  # TenantConfig or None
     
     async def run(
         self,
@@ -531,8 +534,17 @@ class ReactAgent:
         """
         max_steps = max_steps or self.max_steps
         
-        # Build initial messages
+        # Build initial messages – inject tenant context
         system_content = REACT_SYSTEM_PROMPT
+        if self.tenant:
+            # Replace generic glossary line with tenant-specific one
+            if self.tenant.glossary_line:
+                system_content = system_content.replace(
+                    "FACHBEGRIFFE: FAT=Werksabnahme, SAT=Standortabnahme, TFK=Tunnelfunk, GBT=Gotthard Basistunnel, RBT=Rhomberg Bahntechnik",
+                    self.tenant.glossary_line
+                )
+            if self.tenant.system_prompt_extra:
+                system_content += "\n\n" + self.tenant.system_prompt_extra.strip()
         if system_prompt_extra:
             system_content += "\n\n" + system_prompt_extra
         
@@ -560,7 +572,7 @@ class ReactAgent:
             yield {"type": "phase", "content": "⚙️ Dateisystem-Analyse...\n\n"}
             yield {"type": "tool_call", "name": "execute_python", "args": {"code": fs_code}}
             
-            result = await _execute_python({"code": fs_code, "description": "Dateisystem-Analyse"})
+            result = await _execute_python({"code": fs_code, "description": "Dateisystem-Analyse"}, tenant=self.tenant)
             yield {"type": "tool_result", "name": "execute_python", "summary": f"{len(result)} Zeichen"}
             
             # Inject result into conversation for the LLM to summarize
@@ -603,7 +615,7 @@ class ReactAgent:
                     executor = TOOL_EXECUTORS.get(tool_name)
                     if executor:
                         try:
-                            result = await executor(tool_args)
+                            result = await executor(tool_args, tenant=self.tenant)
                             # Collect sources from search results
                             if tool_name == "search_documents":
                                 all_sources.extend(self._extract_sources(result))
@@ -640,7 +652,7 @@ class ReactAgent:
                     print(f"🔄 Forced search_documents (LLM skipped tools): {search_query[:80]}")
                     yield {"type": "phase", "content": f"🔍 Suche: *{search_query[:60]}*...\n\n"}
                     
-                    search_result = await _execute_search({"query": search_query})
+                    search_result = await _execute_search({"query": search_query}, tenant=self.tenant)
                     search_sources = self._extract_sources(search_result)
                     all_sources.extend(search_sources)
                     
@@ -939,7 +951,7 @@ for item in sorted(os.listdir(DATA_ROOT)):
         """Extract source paths from search result text"""
         import re
         sources = []
-        file_base = os.getenv("FILE_BASE", "/media/felix/RAG/1")
+        file_base = self.tenant.document_root if self.tenant else os.getenv("FILE_BASE", "/media/felix/RAG/1")
         
         for match in re.finditer(r'\[(\d+)\]\s+(.+?)(?:\n|$)', search_result):
             n = int(match.group(1))

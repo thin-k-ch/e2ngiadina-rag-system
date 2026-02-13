@@ -1,0 +1,35 @@
+# =============================================================================
+# Mandant-Vorlage – Kopieren und anpassen
+# =============================================================================
+# Dateiname: <short_name>.yaml im tenants/ Verzeichnis
+
+name: "Projektname"
+short_name: "projekt-x"
+
+# Pfade (Host-Pfade, werden in Docker gemountet)
+document_root: "/pfad/zum/projektarchiv"
+
+# Elasticsearch
+es_index: "rag_projekt_x_v1"
+
+# ChromaDB Collection-Prefix
+chroma_prefix: "projekt_x"
+
+# Domain-spezifischer System-Prompt
+system_prompt_extra: |
+  Beschreibe hier den Fachkontext des Projekts.
+
+# Glossar / Fachbegriffe
+glossary: {}
+
+# Whisper Transkript Auto-Korrekturen (falsch → richtig)
+transcript_corrections: {}
+
+# Datei-Erweiterungen für ES-Suche
+ext_filter:
+  - pdf
+  - docx
+  - msg
+  - eml
+  - txt
+  - md

@@ -13,6 +13,7 @@ from .agent_orchestrator import Agent, AgentOrchestrator
 from .rag_pipeline import SimpleRAGPipeline
 from .state import StateStore
 from .es_proxy import router as es_router
+from .tenant_manager import get_tenant_manager
 
 app = FastAPI(title="AGENTIC RAG API")
 
@@ -24,6 +25,9 @@ orchestrator = AgentOrchestrator()
 
 # MVP: Simple RAG pipeline (Query → Search → Snippets → LLM)
 simple_rag = SimpleRAGPipeline()
+
+# Tenant Manager (Mandantenfähigkeit)
+tenant_mgr = get_tenant_manager()
 
 ENABLE_DEBUG_ENDPOINTS = os.getenv("ENABLE_DEBUG_ENDPOINTS", "0") == "1"
 
@@ -244,6 +248,20 @@ async def open_file(path: str):
 
     return FileResponse(normalized_path)
 
+@app.get("/tenants")
+async def list_tenants():
+    """List all available tenants and which one is active"""
+    return {"tenants": tenant_mgr.list_tenants()}
+
+@app.post("/tenants/switch/{short_name}")
+async def switch_tenant(short_name: str):
+    """Switch the active tenant"""
+    if tenant_mgr.set_active(short_name):
+        t = tenant_mgr.active
+        return {"status": "ok", "active": t.short_name, "name": t.name}
+    available = [t["short_name"] for t in tenant_mgr.list_tenants()]
+    raise HTTPException(404, f"Mandant '{short_name}' nicht gefunden. Verfügbar: {available}")
+
 async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = None):
     if not req.messages:
         return {"error": "No messages provided"}
@@ -371,7 +389,7 @@ async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = Non
         return response
 
 @app.post("/v1/chat/completions")
-async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = Header(default=None)):
+async def chat(req: ChatReq, request: Request, x_conversation_id: str | None = Header(default=None), x_tenant_id: str | None = Header(default=None)):
     rid = f"agentic_{int(time.time())}"
     created = int(time.time())
     model = req.model or "agentic-rag"
@@ -647,7 +665,9 @@ Aufgabe: {user_text}"""
                 use_react = selected_model in REACT_MODELS or "react" in model.lower()
                 
                 if use_react:
-                    print(f"🤖 ReAct Agent mode: model={selected_model}")
+                    # Resolve tenant for this request
+                    tenant = tenant_mgr.get_for_request(x_tenant_id)
+                    print(f"🤖 ReAct Agent mode: model={selected_model}, tenant={tenant.short_name}")
                     
                     # Build chat history
                     chat_history = []
@@ -658,7 +678,7 @@ Aufgabe: {user_text}"""
                     chat_history = chat_history[-6:]
                     
                     from .react_agent import ReactAgent
-                    agent = ReactAgent(model=selected_model)
+                    agent = ReactAgent(model=selected_model, tenant=tenant)
                     
                     async for event in agent.run(query=user_text, chat_history=chat_history):
                         etype = event.get("type")

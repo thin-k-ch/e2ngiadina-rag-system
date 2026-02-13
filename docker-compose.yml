@@ -60,6 +60,7 @@ services:
       - /media/felix/RAG/1/volumes/logs:/logs
       - /media/felix/RAG/1/volumes/state:/state
       - /media/felix/RAG/1:/media/felix/RAG/1
+      - ./tenants:/app/tenants:ro
     depends_on:
       - ollama
       - runner
