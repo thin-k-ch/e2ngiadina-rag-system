@@ -1,6 +1,6 @@
 # 🔧 Agentic RAG System – Benutzerhandbuch
 
-> **Stand:** 2025-02-12 | **Version:** Phase 5 (Transcript-to-Protocol + Dynamic Context Window)
+> **Stand:** 2026-02-13 | **Version:** Phase 6 (ReAct Agent + Multi-Tenant)
 
 ---
 
@@ -25,26 +25,28 @@ In OpenWebUI gibt es zwei Gruppen von Modellen:
 
 | Modell | Typ | Beschreibung |
 |--------|-----|--------------|
-| `rag-llama4:latest` | RAG | Llama 4 mit Dokumentensuche |
-| `rag-gpt-oss:latest` | RAG | GPT-OSS mit Dokumentensuche |
-| `rag-qwen2.5:3b` | RAG | Kleines, schnelles Modell |
-| `rag-apertus:70b-...` | RAG | Grosses 70B Modell |
+| `rag-llama4:latest` | ReAct | Llama 4 mit autonomer Tool-Nutzung |
+| `rag-qwen2.5:72b` | ReAct | Qwen 72B – bestes Tool-Calling |
+| `rag-llama3.3:70b` | ReAct | Llama 3.3 70B |
+| `rag-gpt-oss:latest` | RAG | GPT-OSS mit klassischer Dokumentensuche |
 | `llama4:latest` | Direkt | Ollama direkt, **OHNE RAG** |
 
 ### Wichtige Regel:
 - **`rag-*` Modelle** → Die Frage geht durch die RAG-Pipeline (Suche + Dokumente + LLM)
 - **Modelle ohne `rag-`** → Gehen direkt an Ollama, **keine Dokumentensuche!**
 
+### ReAct-Modelle (empfohlen):
+- `rag-llama4:latest`, `rag-qwen2.5:72b`, `rag-llama3.3:70b` nutzen den **ReAct Agent** (Pfad F)
+- Der Agent entscheidet **autonom** welche Tools er braucht: Suchen, Lesen, Code ausführen, etc.
+- Mehrstufige Recherche: Suchen → Dokument lesen → Vertiefen → Antworten
+
 ### Thinking Mode (optional):
-- `-think` Suffix (z.B. `rag-gpt-oss:latest-think`) aktiviert einen **Zwei-Schritt-Analysemodus**:
-  1. LLM analysiert erst die Dokumente (sichtbar in einklappbarem `<think>`-Block)
-  2. Dann schreibt es die finale Antwort
-- **Nicht nötig** für Code-Ausführung oder normale Suchen
+- `-think` Suffix (z.B. `rag-gpt-oss:latest-think`) aktiviert einen **Zwei-Schritt-Analysemodus**
 - Nur nützlich für komplexe Analysefragen, wo der Denkprozess sichtbar sein soll
 
 ---
 
-## 2. Die 5 Verarbeitungspfade
+## 2. Die 6 Verarbeitungspfade
 
 Wenn eine Frage gestellt wird, prüft das System der Reihe nach:
 
@@ -112,9 +114,9 @@ Beispiele:
 
 | Methode | Anleitung | Qualität |
 |---------|-----------|----------|
-| **Dateipfad** (empfohlen) | `Erstelle Protokoll aus der Datei /mein_transkript.txt` | ✅ Voll |
+| **📎 Datei-Upload** (empfohlen) | Datei in OpenWebUI hochladen + "Erstelle Protokoll" | ✅ Bis ~200K Zeichen |
 | **Text einfügen** | Text direkt in den Chat einfügen | ✅ Voll |
-| **Datei-Upload (📎)** | Büroklammer in OpenWebUI | ⚠️ Teilweise (OpenWebUI chunked) |
+| **Dateipfad** | `Erstelle Protokoll aus der Datei /mein_transkript.txt` | ✅ Voll |
 
 **Header-Format für Speaker-Ersetzung:**
 
@@ -130,8 +132,44 @@ Entschuldigung, so...
 
 ---
 
-### Pfad C: Normaler RAG-Flow (Standard)
-**Trigger:** Jede "normale" Frage, die nicht unter A, B oder E fällt.
+### Pfad F: ReAct Agent – Autonome Recherche (NEU Phase 6)
+**Trigger:** Modelle `llama4:latest`, `qwen2.5:72b`, `llama3.3:70b` (automatisch)
+
+Beispiele:
+```
+"Was steht im Werkvertrag über Gewährleistung?"
+"Welche Back-to-Back Regelungen gibt es in unseren Verträgen?"
+"Wie viele PDF-Dateien haben wir pro Ordner?"
+"Welche Ordnerstruktur haben wir?"
+```
+
+**Was passiert:**
+1. Der Agent analysiert die Frage und entscheidet **autonom** welche Tools er braucht
+2. **Mehrstufig:** Suchen → Dokument lesen → ggf. Code ausführen → Antworten
+3. Max. 6 Schritte, dann wird mit dem was vorhanden ist geantwortet
+4. Quellen-Links werden automatisch am Ende angehängt
+
+**7 verfügbare Tools:**
+
+| Tool | Beschreibung |
+|------|-------------|
+| `search_documents` | Hybrid-Suche (ES + Chroma) im Projektarchiv |
+| `read_document` | Dokument vollständig aus ES laden |
+| `execute_python` | Python-Code im Sandbox-Runner ausführen |
+| `create_protocol` | Transkript → strukturiertes Protokoll |
+| `list_files` | Verzeichnisinhalt auflisten |
+| `read_file` | Datei direkt lesen (CSV, TXT, Log) |
+| `web_search` | Internet-Suche (braucht API-Key) |
+
+**Forced-Step-Mechanismus:**
+- Dateisystem-Fragen ("wie viele Dateien", "Ordnerstruktur") → automatisch Python-Code
+- Dokument-Fragen → erzwungene Suche falls LLM kein Tool aufruft
+- Grüsse/Chat → direkte Antwort ohne Tool
+
+---
+
+### Pfad C: Normaler RAG-Flow (Fallback)
+**Trigger:** Jede Frage mit einem Modell das NICHT in den ReAct-Modellen ist.
 
 Beispiele:
 ```
@@ -233,11 +271,12 @@ xlsx, xls, pptx, ppt
 ## 6. Grenzen des Systems
 
 - **Kein Schreiben/Ändern** von Dateien (nur read-only)
-- **Kein Internet-Zugriff** (kein Web-Search, kein Download)
+- **Web-Suche** nur mit API-Key (BRAVE_API_KEY oder SERPER_API_KEY in docker-compose.yml)
 - **Keine Bild/Scan-Analyse** (nur Text-Extrakt aus PDFs)
 - **Kein Chat-übergreifendes Gedächtnis** – jeder Chat ist eine eigene Session
 - **Max ~12'000 Zeichen** pro Dokument im Kontext (wird gekürzt bei RAG-Pfad)
 - **Max 5 Dokumente** bei Multi-Dokument-Analyse
 - **Max 3 vorherige Quellen** als Follow-up-Kontext
-- **Datei-Upload via OpenWebUI** ist begrenzt (Chunking) – Dateipfad oder Text-Paste bevorzugen
+- **Datei-Upload via OpenWebUI** funktioniert bis ~200K Zeichen (RAG_TOP_K=50, CHUNK_SIZE=4000)
 - **Context Window:** Dynamisch bis 128K Tokens (modellabhängig)
+- **ReAct Agent:** Max 6 Schritte pro Anfrage

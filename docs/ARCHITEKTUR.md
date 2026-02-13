@@ -158,8 +158,8 @@ OLLAMA_BASE_URL=http://ollama:11434           # Direktzugriff auf Ollama
 OPENAI_API_BASE_URLS=http://agent_api:11436/v1 # RAG API als "OpenAI"
 OPENAI_API_KEYS=local
 DEFAULT_MODELS=agentic-rag,llama4:latest
-RAG_TOP_K=15                                   # Mehr Chunks bei File-Upload
-CHUNK_SIZE=2000                                # Grössere Chunks
+RAG_TOP_K=50                                   # Viele Chunks bei File-Upload
+CHUNK_SIZE=4000                                # Grosse Chunks (max ~200K)
 CHUNK_OVERLAP=200
 RAG_RELEVANCE_THRESHOLD=0.0                    # Alle Chunks senden
 ```
@@ -638,3 +638,4 @@ docker compose up -d runner
 |-----|-------|--------|
 | `v2025.02.12-phase4` | 2025-02-12 | Code Execution + .eml Fix + Generic Follow-up |
 | `v2025.02.12-phase5` | 2025-02-12 | Transcript→Protocol + Dynamic num_ctx + OpenWebUI Context |
+| `v2026.02.13-phase6` | 2026-02-13 | ReAct Agent + Multi-Tenant + 7 Tools + Fess ES-Plugins |

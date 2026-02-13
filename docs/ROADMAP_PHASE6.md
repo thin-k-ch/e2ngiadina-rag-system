@@ -1,8 +1,9 @@
 # 🚀 Roadmap Phase 6: ReAct Agent + Mandantenfähigkeit
 
-> **Stand:** 2025-02-12 | **Status:** Geplant
+> **Stand:** 2026-02-13 | **Status:** ✅ Abgeschlossen
 > **Ausgangslage:** Phase 5 stabil (5 Pfade, RAG, Code Execution, Transcript→Protocol)
 > **Git-Tag Baseline:** `v2025.02.12-phase5`
+> **Git-Tag Phase 6:** `v2026.02.13-phase6`
 
 ---
 

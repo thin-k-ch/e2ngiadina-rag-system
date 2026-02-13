@@ -628,21 +628,38 @@ Aufgabe: {user_text}"""
                             instruction = "Erstelle ein vollständiges Protokoll mit Pendenzenliste."
                         
                         # Fallback: If user message is short (just instruction, no transcript),
-                        # check if OpenWebUI injected file content via <context> in system message
+                        # check if OpenWebUI injected file content in any message
                         if len(transcript_text) < 200:
                             import re as _re
+                            best_context = ""
                             for m in req.messages:
-                                sys_content = _normalize_content(m.content)
-                                if m.role == "system" and "<context>" in sys_content:
-                                    ctx_match = _re.search(r'<context>\s*(.*?)\s*</context>', sys_content, _re.DOTALL)
-                                    if ctx_match:
-                                        owui_context = ctx_match.group(1).strip()
-                                        if len(owui_context) > len(transcript_text):
-                                            transcript_text = preprocess_transcript(owui_context)
-                                            instruction = user_text
-                                            print(f"📎 Using OpenWebUI file upload: {len(transcript_text)} chars")
-                                            yield _sse_chunk(rid, created, model, {"content": f"📎 Datei-Upload erkannt ({len(transcript_text):,} Zeichen). Erstelle Protokoll...\n\n"})
-                                            break
+                                mc = _normalize_content(m.content)
+                                # Debug: log all messages to find where OpenWebUI puts file content
+                                if len(mc) > 200:
+                                    print(f"📎 Checking msg role={m.role} len={len(mc)} has_context={'<context>' in mc} preview={mc[:100]!r}")
+                                # Method 1: <context> tags (any role)
+                                if "<context>" in mc:
+                                    ctx_match = _re.search(r'<context>\s*(.*?)\s*</context>', mc, _re.DOTALL)
+                                    if ctx_match and len(ctx_match.group(1).strip()) > len(best_context):
+                                        best_context = ctx_match.group(1).strip()
+                                # Method 2: Long system/user message without tags (OpenWebUI may inject raw content)
+                                if not best_context and m.role in ("system", "user") and len(mc) > 500:
+                                    # If this message is much longer than user_text, it likely contains file content
+                                    if len(mc) > len(user_text) * 3 and mc != user_text:
+                                        # Extract everything after user's instruction (if present)
+                                        if user_text in mc:
+                                            candidate = mc.replace(user_text, "").strip()
+                                        else:
+                                            candidate = mc
+                                        if len(candidate) > len(best_context):
+                                            best_context = candidate
+                                            print(f"📎 Found raw content in {m.role} message: {len(candidate)} chars")
+                            
+                            if best_context and len(best_context) > len(transcript_text):
+                                transcript_text = preprocess_transcript(best_context)
+                                instruction = user_text
+                                print(f"📎 Using OpenWebUI file upload: {len(transcript_text)} chars")
+                                yield _sse_chunk(rid, created, model, {"content": f"📎 Datei-Upload erkannt ({len(transcript_text):,} Zeichen). Erstelle Protokoll...\n\n"})
                         
                         print(f"📝 Inline transcript: {len(transcript_text)} chars, instruction: {instruction[:80]}...")
                     
