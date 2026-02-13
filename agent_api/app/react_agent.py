@@ -210,6 +210,7 @@ ANTWORT-FORMAT:
 WICHTIG:
 - Nutze die Tools aktiv! Vermute nicht – suche und lies stattdessen.
 - Für Dateisystem-Fragen IMMER execute_python nutzen, NICHT search_documents.
+- Erfinde NIEMALS URLs oder Links (kein example.com, kein https://...). Quellen-Links werden automatisch am Ende angehängt. Verweise auf Dokumente nur mit [Pfad] oder [N].
 - Bei Transkripten den GESAMTEN Text an create_protocol übergeben, nicht kürzen."""
 
 # ---------------------------------------------------------------------------
