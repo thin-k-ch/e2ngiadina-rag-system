@@ -267,6 +267,7 @@ async def _execute_search(args: dict, tenant=None) -> str:
     
     # Use tenant-specific ES index if available
     es_index = tenant.es_index if tenant else os.getenv("ES_INDEX", "rag_files_v1")
+    ext_filter = tenant.ext_filter if tenant else None
     tools = Tools()
     pipeline = SimpleRAGPipeline()
     
@@ -274,11 +275,15 @@ async def _execute_search(args: dict, tenant=None) -> str:
     from .glossary import rewrite_query
     rewritten, _ = rewrite_query(query)
     
-    # Hybrid search
+    print(f"🔍 _execute_search: query='{rewritten}', es_index={es_index}, tenant={tenant.short_name if tenant else 'none'}")
+    
+    # Hybrid search – pass tenant-specific ES index and ext_filter
     result = await asyncio.to_thread(
         tools.search_hybrid,
         query=rewritten,
-        es_size=40
+        es_size=40,
+        indices=[es_index],
+        ext_filter=ext_filter,
     )
     
     hits = result.get("merged_hits", [])
@@ -318,7 +323,9 @@ async def _execute_read_document(args: dict, tenant=None) -> str:
     
     from .source_analyzer import fetch_document_text
     
-    content, metadata = await fetch_document_text(path)
+    # Pass tenant-specific ES index
+    es_index = tenant.es_index if tenant else None
+    content, metadata = await fetch_document_text(path, es_index=es_index)
     
     if not content:
         return f"Dokument nicht gefunden: {path}"
