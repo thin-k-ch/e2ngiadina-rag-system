@@ -700,9 +700,9 @@ Analysiere die Benutzer-Frage und erstelle einen strukturierten Suchplan als JSO
 
 Regeln:
 - Generiere 1-3 gezielte Suchanfragen (deutsch, mit Synonymen/Fachbegriffen)
-- Entscheide ob Dokumente gelesen werden sollen (read_top_n: 0-5)
-- Wenn der User WORTGENAUE Zitate oder spezifische Kapitel verlangt: read_top_n=3-5 (mehr lesen!)
-- Wenn der User auf "Quelle X" verweist: read_top_n mindestens so hoch wie X
+- Entscheide ob Dokumente gelesen werden sollen (read_top_n: 0-3)
+- Wenn der User WORTGENAUE Zitate oder spezifische Kapitel verlangt: read_top_n=1-2 (gezielt lesen!)
+- Weniger Dokumente = bessere Zitatqualität. Lieber 1 richtiges als 5 falsche.
 - Gib Fokus-Hinweise für die finale Antwort
 - Bei einfachen Fragen: weniger Schritte. Bei komplexen: mehr.
 - Bei Grüssen/Small-Talk: setze "skip": true
@@ -714,8 +714,12 @@ Antworte NUR mit validem JSON, kein anderer Text:
   "read_top_n": 2,
   "focus": "Worauf die Antwort fokussieren soll",
   "answer_format": "Prosa / Tabelle / Liste / Aufzählung",
-  "answer_hint": "Zusätzliche Hinweise für die Antwortgenerierung"
-}"""
+  "answer_hint": "z.B. 'Zitiere WORTGENAU aus dem Dokument' oder 'Vergleiche die Quellen'"
+}
+
+WICHTIG für answer_hint:
+- Wenn der User "wortgenau", "exakt", "originaltext" oder "zitiere" schreibt: answer_hint MUSS "Zitiere WORTGENAU und VOLLSTÄNDIG aus dem Dokument. Kein Paraphrasieren!" enthalten
+- Wenn der User ein spezifisches Kapitel nennt: answer_hint MUSS "Fokussiere auf das genannte Kapitel" enthalten"""
         
         messages = [{"role": "system", "content": planner_prompt}]
         if chat_history:
@@ -813,14 +817,18 @@ Antworte NUR mit validem JSON, kein anderer Text:
             summary = f"{len(result)} Zeichen"
             yield {"type": "tool_result", "name": "search_documents", "summary": summary}
         
-        # Step 2: Read top documents if requested
-        read_n = min(plan.get("read_top_n", 0), 5)
+        # Step 2: Read top documents if requested (max 3, dedup by path)
+        read_n = min(plan.get("read_top_n", 0), 3)
         if read_n > 0 and all_sources:
-            for src in all_sources[:read_n]:
-                steps += 1
+            seen_paths = set()
+            for src in all_sources:
+                if len(read_sources) >= read_n:
+                    break
                 path = src.get("path", "")
-                if not path:
+                if not path or path in seen_paths:
                     continue
+                seen_paths.add(path)
+                steps += 1
                 yield {"type": "phase", "content": f"📄 Lese: *{src.get('display_name', path)[:50]}*...\n\n"}
                 yield {"type": "tool_call", "name": "read_document", "args": {"path": path}}
                 
@@ -842,11 +850,8 @@ Antworte NUR mit validem JSON, kein anderer Text:
         messages = self._build_system_messages(query, chat_history, system_prompt_extra)
         user_msg = messages.pop()  # Remove user query (re-add at end)
         
-        # If documents were read, prioritize their FULL content over search snippets
+        # If documents were read, use ONLY their full content (no search snippet noise)
         if read_context:
-            # Only include search snippets as brief overview, then full docs
-            messages.append({"role": "assistant", "content": "Ich habe relevante Dokumente gefunden und vollständig gelesen."})
-            messages.append({"role": "tool", "content": search_context[0][:3000] if search_context else ""})
             for ctx in read_context:
                 truncated = ctx[:20000] if len(ctx) > 20000 else ctx
                 messages.append({"role": "assistant", "content": "Vollständiger Dokument-Inhalt:"})
