@@ -1166,9 +1166,25 @@ WICHTIG für answer_hint:
                     async for evt in self._stream_with_thinking(messages):
                         yield evt
                 elif step == 1 and forced_search_done:
-                    # After forced search, LLM skipped read_document → give it one more chance
-                    print(f"🔄 Post-forced-search: LLM skipped read_document, continuing for one more step")
-                    forced_search_done = False  # Don't loop again
+                    # After forced search, LLM skipped read_document → force it
+                    if all_sources:
+                        top_src = all_sources[0]
+                        top_path = top_src.get("path", "")
+                        if top_path:
+                            print(f"🔄 Forced read_document (LLM skipped): {top_path[-60:]}")
+                            yield {"type": "phase", "content": f"📄 Lese: *{top_src.get('display_name', top_path)[:50]}*...\n\n"}
+                            yield {"type": "tool_call", "name": "read_document", "args": {"path": top_path}}
+                            doc_result = await _execute_read_document({"path": top_path, "query_hint": query}, tenant=self.tenant)
+                            thinking_steps += 1
+                            summary = f"{len(doc_result)} Zeichen"
+                            yield {"type": "tool_result", "name": "read_document", "summary": summary}
+                            messages.append({
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [{"function": {"name": "read_document", "arguments": {"path": top_path}}}]
+                            })
+                            messages.append({"role": "tool", "content": doc_result})
+                    forced_search_done = False
                     continue
                 elif step == 0 and not fs_code and self._needs_search(query):
                     # Step 0, no filesystem query, but looks like a document question
