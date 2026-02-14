@@ -314,6 +314,73 @@ async def ollama_version():
     except:
         return {"version": "proxy"}
 
+def _handle_tenant_command(user_text: str) -> str | None:
+    """Detect tenant-related chat commands and return instant response (no LLM needed).
+    Returns response string or None if not a tenant command."""
+    q = user_text.lower().strip()
+    
+    # --- List tenants ---
+    list_patterns = [
+        "welche mandanten", "welche mandaten", "liste mandanten", "mandanten liste",
+        "zeig mandanten", "verfügbare mandanten", "available tenants",
+        "welche projekte gibt es", "welche projekte haben wir",
+        "mandanten anzeigen", "show tenants", "list tenants",
+    ]
+    if any(p in q for p in list_patterns):
+        tenants = tenant_mgr.list_tenants()
+        if not tenants:
+            return "⚠️ Keine Mandanten konfiguriert."
+        lines = ["## 🏢 Verfügbare Mandanten\n"]
+        for t in tenants:
+            status = "✅ **aktiv**" if t["active"] else "⬜"
+            lines.append(f"- **{t['short_name']}** – {t['name']} {status}")
+            lines.append(f"  - ES-Index: `{t['es_index']}` | Dokumente: `{t['document_root']}`")
+        lines.append(f"\n💡 *Zum Wechseln schreibe z.B.: \"Wechsle zu {{name}}\"*")
+        return "\n".join(lines)
+    
+    # --- Switch tenant ---
+    import re as _re
+    switch_patterns = [
+        r'wechsl\w*\s+(?:zu|auf|nach)\s+(\S+)',
+        r'nutz\w*\s+mandant\w*\s+(\S+)',
+        r'switch\s+(?:to\s+)?(\S+)',
+        r'mandant\w*\s+wechsel\w*\s+(?:zu|auf|nach)\s+(\S+)',
+        r'aktivier\w*\s+(\S+)',
+        r'use\s+tenant\s+(\S+)',
+    ]
+    for pattern in switch_patterns:
+        m = _re.search(pattern, q)
+        if m:
+            target = m.group(1).strip().strip('"\'')
+            # Try exact match first, then fuzzy
+            if tenant_mgr.set_active(target):
+                t = tenant_mgr.active
+                return f"## 🏢 Mandant gewechselt: **{t.short_name}**\n\n- **Projekt**: {t.name}\n- **ES-Index**: `{t.es_index}`\n- **Dokumente**: `{t.document_root}`\n\nAb jetzt werden alle Suchanfragen und Dokumente aus diesem Projekt verwendet."
+            # Fuzzy: try matching substring
+            for tenant_info in tenant_mgr.list_tenants():
+                sn = tenant_info["short_name"]
+                if target in sn or sn in target:
+                    tenant_mgr.set_active(sn)
+                    t = tenant_mgr.active
+                    return f"## 🏢 Mandant gewechselt: **{t.short_name}**\n\n- **Projekt**: {t.name}\n- **ES-Index**: `{t.es_index}`\n- **Dokumente**: `{t.document_root}`\n\nAb jetzt werden alle Suchanfragen und Dokumente aus diesem Projekt verwendet."
+            available = [t["short_name"] for t in tenant_mgr.list_tenants()]
+            return f"❌ Mandant **{target}** nicht gefunden.\n\nVerfügbar: {', '.join(f'`{a}`' for a in available)}"
+    
+    # --- Current tenant ---
+    current_patterns = [
+        "welcher mandant", "aktueller mandant", "aktiver mandant",
+        "current tenant", "active tenant", "welches projekt ist aktiv",
+        "welchen mandant", "auf welchem mandant", "in welchem projekt",
+    ]
+    if any(p in q for p in current_patterns):
+        t = tenant_mgr.active
+        if t:
+            return f"## 🏢 Aktiver Mandant: **{t.short_name}**\n\n- **Projekt**: {t.name}\n- **ES-Index**: `{t.es_index}`\n- **Dokumente**: `{t.document_root}`"
+        return "⚠️ Kein Mandant aktiv."
+    
+    return None
+
+
 @app.post("/api/chat")
 async def ollama_chat(request: Request, x_tenant_id: str | None = Header(default=None)):
     """Ollama-format /api/chat – routes through ReAct Agent, streams in Ollama format.
@@ -351,6 +418,14 @@ async def ollama_chat(request: Request, x_tenant_id: str | None = Header(default
                         if line:
                             yield line + "\n"
         return StreamingResponse(stream_title(), media_type="application/x-ndjson")
+    
+    # --- Tenant chat commands (fast path, no LLM needed) ---
+    tenant_response = _handle_tenant_command(user_text)
+    if tenant_response:
+        async def stream_tenant_resp():
+            yield json.dumps({"model": model_name, "message": {"role": "assistant", "content": tenant_response}, "done": False}) + "\n"
+            yield json.dumps({"model": model_name, "message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}) + "\n"
+        return StreamingResponse(stream_tenant_resp(), media_type="application/x-ndjson")
     
     # Route through ReAct Agent
     tenant = tenant_mgr.get_for_request(x_tenant_id)

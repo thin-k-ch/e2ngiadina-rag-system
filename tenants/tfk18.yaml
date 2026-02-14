@@ -1,0 +1,46 @@
+# =============================================================================
+# Mandant: TFK18 – Tunnelfunk 2018
+# =============================================================================
+
+name: "TFK18 – Tunnelfunk 2018"
+short_name: "tfk18"
+
+# Pfade (Host-Pfade, werden in Docker gemountet)
+document_root: "/media/felix/RAG/TFK18"
+
+# Elasticsearch
+es_index: "rag_tfk18_v1"
+
+# ChromaDB Collection-Prefix
+chroma_prefix: "tfk18"
+
+# Domain-spezifischer System-Prompt
+system_prompt_extra: |
+  Du bist Spezialist für das TFK18-Projekt (Tunnelfunk 2018).
+  Kontext: Schweizer Eisenbahn-Tunnelfunk, Aktivkomponenten, Passivkomponenten, Leckkabel, HF-Anbindungen.
+
+# Glossar / Fachbegriffe
+glossary:
+  TFK: "Tunnelfunk"
+  HF: "Hochfrequenz"
+  LF: "Niederfrequenz"
+  FEA: "Funktions-Eignungs-Abnahme"
+  SOLiD: "SOLiD (Distributed Antenna System)"
+  AirScale: "Nokia AirScale"
+
+# Whisper Transkript Auto-Korrekturen
+transcript_corrections: {}
+
+# Datei-Erweiterungen für ES-Suche
+ext_filter:
+  - pdf
+  - docx
+  - doc
+  - msg
+  - eml
+  - xlsx
+  - xls
+  - pptx
+  - ppt
+  - txt
+  - md

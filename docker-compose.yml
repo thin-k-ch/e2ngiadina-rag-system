@@ -62,6 +62,7 @@ services:
       - /media/felix/RAG/1/volumes/logs:/logs
       - /media/felix/RAG/1/volumes/state:/state
       - /media/felix/RAG/1:/media/felix/RAG/1
+      - /media/felix/RAG/TFK18:/media/felix/RAG/TFK18:ro
       - /media/felix/RAG/1/volumes/memories:/memories
       - ./tenants:/app/tenants:ro
     depends_on:
