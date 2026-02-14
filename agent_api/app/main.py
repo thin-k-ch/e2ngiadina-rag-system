@@ -355,14 +355,22 @@ def _handle_tenant_command(user_text: str) -> str | None:
             # Try exact match first, then fuzzy
             if tenant_mgr.set_active(target):
                 t = tenant_mgr.active
-                return f"## 🏢 Mandant gewechselt: **{t.short_name}**\n\n- **Projekt**: {t.name}\n- **ES-Index**: `{t.es_index}`\n- **Dokumente**: `{t.document_root}`\n\nAb jetzt werden alle Suchanfragen und Dokumente aus diesem Projekt verwendet."
+                return (f"## 🏢 Mandant gewechselt: **{t.short_name}**\n\n"
+                        f"- **Projekt**: {t.name}\n- **ES-Index**: `{t.es_index}`\n- **Dokumente**: `{t.document_root}`\n\n"
+                        f"Ab jetzt werden alle Suchanfragen und Dokumente aus diesem Projekt verwendet.\n\n"
+                        f"💡 *Empfehlung: Starte einen **neuen Chat** damit der Kontext sauber ist.*\n\n"
+                        f"<!-- TENANT_SWITCH:{t.short_name} -->")
             # Fuzzy: try matching substring
             for tenant_info in tenant_mgr.list_tenants():
                 sn = tenant_info["short_name"]
                 if target in sn or sn in target:
                     tenant_mgr.set_active(sn)
                     t = tenant_mgr.active
-                    return f"## 🏢 Mandant gewechselt: **{t.short_name}**\n\n- **Projekt**: {t.name}\n- **ES-Index**: `{t.es_index}`\n- **Dokumente**: `{t.document_root}`\n\nAb jetzt werden alle Suchanfragen und Dokumente aus diesem Projekt verwendet."
+                    return (f"## 🏢 Mandant gewechselt: **{t.short_name}**\n\n"
+                            f"- **Projekt**: {t.name}\n- **ES-Index**: `{t.es_index}`\n- **Dokumente**: `{t.document_root}`\n\n"
+                            f"Ab jetzt werden alle Suchanfragen und Dokumente aus diesem Projekt verwendet.\n\n"
+                            f"💡 *Empfehlung: Starte einen **neuen Chat** damit der Kontext sauber ist.*\n\n"
+                            f"<!-- TENANT_SWITCH:{t.short_name} -->")
             available = [t["short_name"] for t in tenant_mgr.list_tenants()]
             return f"❌ Mandant **{target}** nicht gefunden.\n\nVerfügbar: {', '.join(f'`{a}`' for a in available)}"
     
@@ -432,14 +440,22 @@ async def ollama_chat(request: Request, x_tenant_id: str | None = Header(default
     print(f"🤖 Ollama /api/chat → ReAct: model={selected_model}, tenant={tenant.short_name}")
     
     # Build chat history (all messages except last user message)
+    # Truncate at last tenant switch to avoid cross-tenant context bleeding
     chat_history = []
-    for m in messages[:-1]:
+    last_switch_idx = -1
+    for i, m in enumerate(messages[:-1]):
         role = m.get("role", "")
         content = m.get("content", "")
         if isinstance(content, list):
             content = " ".join(p.get("text", str(p)) if isinstance(p, dict) else str(p) for p in content)
         if role in ("user", "assistant") and content:
             chat_history.append({"role": role, "content": str(content)[:2000]})
+            if "<!-- TENANT_SWITCH:" in str(content):
+                last_switch_idx = len(chat_history) - 1
+    # Drop everything up to and including the last tenant switch message
+    if last_switch_idx >= 0:
+        chat_history = chat_history[last_switch_idx + 1:]
+        print(f"✂️ Chat history truncated at tenant switch (dropped {last_switch_idx + 1} messages)")
     chat_history = chat_history[-6:]
     
     from .react_agent import ReactAgent, LLMError
@@ -549,11 +565,18 @@ async def ollama_chat(request: Request, x_tenant_id: str | None = Header(default
 
 @app.get("/open")
 async def open_file(path: str):
+    # Allow access to any tenant's document_root
+    allowed_roots = set()
     file_base = os.getenv("FILE_BASE", "")
-    if file_base and not path.startswith(file_base):
-        return {"error": "Access denied - path outside base directory"}
-
+    if file_base:
+        allowed_roots.add(file_base)
+    for t in tenant_mgr.list_tenants():
+        allowed_roots.add(t["document_root"])
+    
     normalized_path = os.path.normpath(path)
+    if allowed_roots and not any(normalized_path.startswith(root) for root in allowed_roots):
+        return {"error": "Access denied - path outside allowed directories"}
+
     if not os.path.exists(normalized_path):
         return {"error": "File not found"}
     if not os.path.isfile(normalized_path):
