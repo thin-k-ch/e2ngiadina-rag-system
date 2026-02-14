@@ -45,6 +45,14 @@ def main():
             project = md.get("project") or derive_project(path)
             folder = md.get("mail_folder") or md.get("folder") or ""
 
+            # Carry over metadata fields from Chroma (author, title, email headers, etc.)
+            meta_fields = {}
+            for mk in ("author", "title", "subject", "creation_date", "modified_date",
+                        "last_modified_by", "producer", "page_count",
+                        "email_from", "email_to", "email_cc", "email_subject", "email_date"):
+                if md.get(mk):
+                    meta_fields[mk] = md[mk]
+
             actions.append({
               "_op_type": "index",
               "_index": ES_INDEX,
@@ -56,7 +64,8 @@ def main():
               "document_type": dt,
               "project": project,
               "folder": folder,
-              "chunk_index": int(chunk_index) if str(chunk_index).isdigit() else 0
+              "chunk_index": int(chunk_index) if str(chunk_index).isdigit() else 0,
+              **meta_fields
             })
 
         if actions:

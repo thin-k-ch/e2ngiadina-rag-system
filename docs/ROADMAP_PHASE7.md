@@ -1,9 +1,10 @@
-# 🚀 Roadmap Phase 7: Qualität, UX & Erweiterungen
+# 🚀 Roadmap Phase 7+8: Qualität, UX & Erweiterungen
 
-> **Stand:** 2026-02-13 | **Status:** Weitgehend abgeschlossen
+> **Stand:** 2026-02-14 | **Status:** Phase 8a abgeschlossen
 > **Ausgangslage:** Phase 6 stabil (ReAct Agent, 7 Tools, Multi-Tenant, File-Upload Protokoll)
 > **Git-Tag Baseline:** `v2026.02.13-phase6-hotfix`
-> **Aktueller Stand:** Auto-Discovery, Model-Management, Prompt-basiertes Tool-Calling, DeepSeek-R1 integriert
+> **Aktueller Tag:** `v2026.02.14-phase8a`
+> **Aktueller Stand:** Thinking Mode, Cross-Encoder Reranking, verbesserte Quellen, Metadaten-Extraktion
 
 ---
 
@@ -65,27 +66,41 @@
 - **Greeting-Shortcut**: Prompt-Tool-Modelle überspringen den teuren Tool-Prompt bei einfachen Fragen
 - **Timeouts**: Reasoning-Modelle erhalten 600s statt 300s (lange `<think>`-Phase)
 
-#### 3.3 Indexer-Verbesserungen
+#### 3.3 ~~Indexer-Verbesserungen~~ ✅ Teilweise erledigt (Metadaten)
 - **Inkrementelles Re-Indexing**: Nur geänderte Dateien neu indexieren (Manifest existiert)
 - **Neue Formate**: HTML, RTF, CSV nativ (nicht nur via Python)
-- **Metadaten-Extraktion**: Autor, Datum, Betreff aus E-Mails und Office-Dokumenten
+- ~~**Metadaten-Extraktion**~~: ✅ Autor, Datum, Betreff aus E-Mails (.eml/.msg), PDFs und DOCX
+  - `text_loaders.py`: `extract_pdf_metadata()`, `extract_docx_metadata()`, `extract_eml_metadata()`, `extract_msg_metadata()`
+  - PDF: Author, Title, CreationDate, Producer, PageCount (via PyMuPDF)
+  - DOCX: Author, Title, Subject, Created, Modified, LastModifiedBy
+  - EML/MSG: From, To, Cc, Subject, Date
+  - Chroma→ES Transfer: Metadaten-Felder werden übertragen
 
 ### Prio 2: UX-Verbesserungen
 
-#### 3.4 Bessere Quellen-Links
-- Quellen als klickbare Links die das Dokument direkt öffnen
-- PDF: Direkt zur Seite springen (wenn Seitennummer bekannt)
-- Quellen-Preview: Kurzes Snippet unter jedem Link
+#### 3.4 ~~Bessere Quellen-Links~~ ✅ Erledigt
+- ✅ Quellen als klickbare Markdown-Links mit `/open` Endpoint
+- ✅ Saubere Dateinamen (Ordner/Datei statt voller Pfad)
+- ✅ Snippet-Preview unter jedem Link
+- ✅ Deduplizierung (gleiche Datei nur 1x gelistet)
+- ✅ Visueller Separator (`---`) und **Fettdruck** für Quellen-Nummern
 
 #### 3.5 Chat-Kontext verbessern
 - Längerer Konversationsverlauf (aktuell 3 Turns)
 - Session-Zusammenfassung für lange Gespräche
 - "Merke dir X" → Persistenter Notiz-Speicher pro Mandant
 
-#### 3.6 Fortschrittsanzeige
-- Bessere Phase-Indikatoren: "Schritt 2/4: Lese Dokument..."
-- Geschätzte Wartezeit bei langen Operationen
-- Token-Zähler / Context-Window-Auslastung (für Debugging)
+#### 3.6 ~~Fortschrittsanzeige / Thinking Mode~~ ✅ Erledigt
+- ✅ **Thinking Mode**: Collapsible `<details>` Blöcke für ReAct-Schritte
+  - `🧠 Recherche & Analyse`: Tool-Calls, Ergebnisse, Schrittanzahl + Dauer
+  - `💭 Überlegung`: `<think>`-Blöcke von Reasoning-Modellen (DeepSeek-R1)
+- ✅ **Keepalive**: Alle 5s `⏳ Denke nach... (Xs)` während LLM-Calls
+- ✅ **Timeout erhöht**: `AIOHTTP_CLIENT_TIMEOUT=900` (15 Min) in OpenWebUI
+- ✅ **Cross-Encoder Reranking**: `cross-encoder/ms-marco-MiniLM-L-6-v2` (~90 MB)
+  - Rerankt Top-20 Suchergebnisse semantisch nach Hybrid-Merge
+  - Lazy-Loading, ~0.2s für 20 Hits
+  - Konfigurierbar: `RERANKER_ENABLED`, `RERANKER_MODEL`, `RERANKER_TOP_N`
+- ✅ **System-Prompt**: Ausführlichere, detailliertere Antworten mit Markdown-Struktur
 
 ### Prio 3: Neue Features
 
@@ -138,12 +153,15 @@
 5. ~~Modell-Architektur: Auto-Discovery, kein rag- Prefix~~ ✅
 6. ~~DeepSeek-R1: Prompt-basiertes Tool-Calling~~ ✅
 
-### Nächste Session (Phase 8a – Retrieval-Qualität)
-7. **Cross-Encoder Reranking** → deutlich bessere Suchergebnisse (1 GB GPU)
-8. **Indexer: Metadaten-Extraktion** → Autor, Datum, Betreff aus E-Mails/Office
-9. **Quellen-Links verbessern** → klickbare Links, PDF-Seitensprung
+### ✅ Erledigt (Phase 8a – 2026-02-14)
+7. ~~Cross-Encoder Reranking~~ → `reranker.py`, ms-marco-MiniLM-L-6-v2 ✅
+8. ~~Indexer: Metadaten-Extraktion~~ → PDF/DOCX/EML/MSG Metadaten ✅
+9. ~~Quellen-Links verbessern~~ → klickbare Links, Snippet-Preview, Dedup ✅
+10. ~~Thinking Mode~~ → `<details>` Blöcke, Keepalive, Reasoning-Events ✅
+11. ~~Ausführlichere Antworten~~ → System-Prompt erweitert ✅
+12. ~~Timeout erhöhen~~ → AIOHTTP_CLIENT_TIMEOUT=900 ✅
 
-### Mittelfristig (Phase 8b – Autonomie)
+### Nächste Session (Phase 8b – Autonomie)
 10. **Whisper-Integration** → Audio-Upload → Transkription → Protokoll (lokal auf GPU)
 11. **Langzeit-Gedächtnis** → Persistenter Notiz-Speicher pro Mandant/Session
 12. **Multi-Dokument-Vergleich** → Diff zwischen Versionen, Änderungstracking

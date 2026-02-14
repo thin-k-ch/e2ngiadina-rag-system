@@ -205,13 +205,16 @@ ARBEITSWEISE:
 8. Erst wenn du exakte Fakten aus den Dokumenten hast → Antwort formulieren
 
 ANTWORT-REGELN:
-- Antworte auf Deutsch
+- Antworte auf Deutsch, AUSFÜHRLICH und DETAILLIERT
 - Starte DIREKT mit Fakten – KEINE Einleitungen ("Basierend auf...", "Gerne...", "Hier sind...")
 - ZITIERE exakte Textpassagen aus den Dokumenten in Anführungszeichen: "exakter Text" [N]
 - Nenne Seitenzahlen, Datumswerte und Kapitelnummern wenn verfügbar
 - Verwende Indikativ, nicht Konjunktiv (schreibe "Der Vertrag regelt..." statt "Der Vertrag könnte regeln...")
-- Kurze Absätze und Aufzählungen statt Fliesstext
-- Sei gründlich, vollständig und KONKRET – keine allgemeinen Aussagen wenn spezifische Details vorliegen
+- Strukturiere mit Markdown: Überschriften (##), Aufzählungen, **Fettdruck** für Schlüsselbegriffe
+- Sei GRÜNDLICH und VOLLSTÄNDIG: Erkläre Zusammenhänge, nenne alle relevanten Details aus den Dokumenten
+- Gib IMMER den vollständigen Kontext: Wer, Was, Wann, Warum – nicht nur Stichworte
+- Wenn mehrere Dokumente relevant sind: fasse die Informationen aus ALLEN zusammen
+- Mindestens 3-5 Absätze bei Sachfragen – kurze Antworten nur bei einfachen Faktenfragen
 - Bei Begrüssungen (Hallo, Hi): antworte kurz und freundlich, liste NICHT deine Tools auf
 
 VERBOTEN:
@@ -260,6 +263,10 @@ async def _execute_search(args: dict, tenant=None) -> str:
         normalized.append({"path": path, "snippet": snippet, "score": score})
     
     ranked = pipeline._rank_hits(normalized, query)
+    
+    # Cross-Encoder Reranking (semantic rerank of top hits)
+    from .reranker import rerank
+    ranked = await asyncio.to_thread(rerank, query, ranked)
     
     # Format top results for the LLM
     top_n = ranked[:10]
@@ -617,25 +624,30 @@ class ReactAgent:
         # Collect sources for linking
         all_sources = []
         forced_search_done = False  # Track if we did a forced search (to give LLM extra step for read_document)
+        thinking_active = False
+        thinking_start_time = None
+        thinking_steps = 0
         
         # --- Shortcut for prompt-tool models on simple queries ---
         fs_code = self._auto_filesystem_code(query)
         if self._use_prompt_tools and not fs_code and not self._needs_search(query):
             print(f"⚡ Prompt-tool model shortcut: simple query, skipping tool-calling")
-            yield {"type": "phase", "content": ""}
-            # For prompt-tool models, stream directly without tool instructions
-            async for token in self._llm_stream_final(messages):
-                yield {"type": "token", "content": token}
+            async for evt in self._stream_with_thinking(messages):
+                yield evt
             yield {"type": "done"}
             return
         
         # --- Forced first step for filesystem queries ---
         if fs_code:
             print(f"📂 Forced execute_python for filesystem query")
+            thinking_active = True
+            thinking_start_time = time.time()
+            yield {"type": "thinking_start"}
             yield {"type": "phase", "content": "⚙️ Dateisystem-Analyse...\n\n"}
             yield {"type": "tool_call", "name": "execute_python", "args": {"code": fs_code}}
             
             result = await _execute_python({"code": fs_code, "description": "Dateisystem-Analyse"}, tenant=self.tenant)
+            thinking_steps += 1
             yield {"type": "tool_result", "name": "execute_python", "summary": f"{len(result)} Zeichen"}
             
             # Inject result into conversation for the LLM to summarize
@@ -650,8 +662,17 @@ class ReactAgent:
         for step in range(max_steps):
             print(f"🤖 ReAct step {step+1}/{max_steps}")
             
-            # Call LLM with tools (non-streaming)
-            response = await self._llm_with_tools(messages)
+            # Call LLM with tools (with keepalive to prevent timeouts)
+            response = None
+            async for evt in self._llm_with_tools_keepalive(messages):
+                if evt["type"] == "keepalive":
+                    if not thinking_active:
+                        thinking_active = True
+                        thinking_start_time = time.time()
+                        yield {"type": "thinking_start"}
+                    yield evt
+                else:
+                    response = evt["data"]
             
             tool_calls = response.get("message", {}).get("tool_calls")
             content = response.get("message", {}).get("content", "")
@@ -676,6 +697,10 @@ class ReactAgent:
                         tool_args = tool_args["parameters"]
                     
                     print(f"🔧 Tool call: {tool_name}({tool_args})")
+                    if not thinking_active:
+                        thinking_active = True
+                        thinking_start_time = time.time()
+                        yield {"type": "thinking_start"}
                     yield {"type": "phase", "content": self._phase_label(tool_name, tool_args)}
                     yield {"type": "tool_call", "name": tool_name, "args": tool_args}
                     
@@ -694,6 +719,7 @@ class ReactAgent:
                         result = f"Unbekanntes Tool: {tool_name}"
                     
                     summary = f"{len(result)} Zeichen" if len(result) > 100 else result[:100]
+                    thinking_steps += 1
                     yield {"type": "tool_result", "name": tool_name, "summary": summary}
                     
                     # Add assistant tool_call + tool result to conversation
@@ -710,9 +736,12 @@ class ReactAgent:
                 # LLM wants to answer directly (no tool call)
                 if step > 0 and not (step == 1 and forced_search_done):
                     # Already have tool context → stream final answer
-                    yield {"type": "phase", "content": "✍️ Erstelle Antwort...\n\n"}
-                    async for token in self._llm_stream_final(messages):
-                        yield {"type": "token", "content": token}
+                    if thinking_active:
+                        elapsed = int(time.time() - thinking_start_time) if thinking_start_time else 0
+                        yield {"type": "thinking_end", "steps": thinking_steps, "elapsed": elapsed}
+                        thinking_active = False
+                    async for evt in self._stream_with_thinking(messages):
+                        yield evt
                 elif step == 1 and forced_search_done:
                     # After forced search, LLM skipped read_document → give it one more chance
                     print(f"🔄 Post-forced-search: LLM skipped read_document, continuing for one more step")
@@ -721,6 +750,10 @@ class ReactAgent:
                 elif step == 0 and not fs_code and self._needs_search(query):
                     # Step 0, no filesystem query, but looks like a document question
                     # → Force a search before answering
+                    if not thinking_active:
+                        thinking_active = True
+                        thinking_start_time = time.time()
+                        yield {"type": "thinking_start"}
                     search_query = query[:200]
                     print(f"🔄 Forced search_documents (LLM skipped tools): {search_query[:80]}")
                     yield {"type": "phase", "content": f"🔍 Suche: *{search_query[:60]}*...\n\n"}
@@ -728,6 +761,7 @@ class ReactAgent:
                     search_result = await _execute_search({"query": search_query}, tenant=self.tenant)
                     search_sources = self._extract_sources(search_result)
                     all_sources.extend(search_sources)
+                    thinking_steps += 1
                     
                     # Inject search result into conversation
                     messages.append({
@@ -746,13 +780,20 @@ class ReactAgent:
                     continue
                 elif content:
                     # Simple question or model doesn't support tools
-                    yield {"type": "phase", "content": ""}
-                    async for token in self._llm_stream_final(messages):
-                        yield {"type": "token", "content": token}
+                    if thinking_active:
+                        elapsed = int(time.time() - thinking_start_time) if thinking_start_time else 0
+                        yield {"type": "thinking_end", "steps": thinking_steps, "elapsed": elapsed}
+                        thinking_active = False
+                    async for evt in self._stream_with_thinking(messages):
+                        yield evt
                 else:
                     # Empty response - fallback to streaming
-                    async for token in self._llm_stream_final(messages):
-                        yield {"type": "token", "content": token}
+                    if thinking_active:
+                        elapsed = int(time.time() - thinking_start_time) if thinking_start_time else 0
+                        yield {"type": "thinking_end", "steps": thinking_steps, "elapsed": elapsed}
+                        thinking_active = False
+                    async for evt in self._stream_with_thinking(messages):
+                        yield evt
                 
                 # Yield sources
                 if all_sources:
@@ -762,9 +803,12 @@ class ReactAgent:
                 return
         
         # Max steps reached - generate final answer with what we have
-        yield {"type": "phase", "content": "✍️ Maximale Schritte erreicht, erstelle Antwort...\n\n"}
-        async for token in self._llm_stream_final(messages):
-            yield {"type": "token", "content": token}
+        if thinking_active:
+            elapsed = int(time.time() - thinking_start_time) if thinking_start_time else 0
+            yield {"type": "thinking_end", "steps": thinking_steps, "elapsed": elapsed}
+            thinking_active = False
+        async for evt in self._stream_with_thinking(messages):
+            yield evt
         
         if all_sources:
             yield {"type": "sources", "sources": all_sources}
@@ -1034,6 +1078,74 @@ class ReactAgent:
                     print(f"❌ LLM stream failed (attempt 2/2): {type(e).__name__}: {e}")
                     raise LLMError(f"LLM-Streaming fehlgeschlagen nach 2 Versuchen: {type(last_err).__name__}")
     
+    async def _llm_with_tools_keepalive(self, messages: list) -> AsyncGenerator[dict, None]:
+        """Wrap _llm_with_tools: yields keepalive events every 5s while waiting for LLM."""
+        task = asyncio.create_task(self._llm_with_tools(messages))
+        start = time.time()
+        while not task.done():
+            done, _ = await asyncio.wait({task}, timeout=5.0)
+            if done:
+                break
+            elapsed = int(time.time() - start)
+            yield {"type": "keepalive", "elapsed": elapsed}
+        
+        if task.cancelled():
+            raise LLMError("LLM-Aufruf abgebrochen")
+        exc = task.exception()
+        if exc:
+            raise exc
+        yield {"type": "result", "data": task.result()}
+    
+    async def _stream_with_thinking(self, messages: list) -> AsyncGenerator[dict, None]:
+        """Stream final answer, separating <think> blocks into structured events for reasoning models."""
+        buffer = ""
+        in_think = False
+        
+        async for token in self._llm_stream_final(messages):
+            buffer += token
+            
+            while True:
+                if not in_think:
+                    idx = buffer.find("<think>")
+                    if idx != -1:
+                        before = buffer[:idx]
+                        if before:
+                            yield {"type": "token", "content": before}
+                        yield {"type": "reasoning_start"}
+                        buffer = buffer[idx + 7:]
+                        in_think = True
+                        continue
+                    else:
+                        safe = max(0, len(buffer) - 7)
+                        if safe > 0:
+                            yield {"type": "token", "content": buffer[:safe]}
+                            buffer = buffer[safe:]
+                        break
+                else:
+                    idx = buffer.find("</think>")
+                    if idx != -1:
+                        before = buffer[:idx]
+                        if before:
+                            yield {"type": "reasoning_token", "content": before}
+                        yield {"type": "reasoning_end"}
+                        buffer = buffer[idx + 8:]
+                        in_think = False
+                        continue
+                    else:
+                        safe = max(0, len(buffer) - 8)
+                        if safe > 0:
+                            yield {"type": "reasoning_token", "content": buffer[:safe]}
+                            buffer = buffer[safe:]
+                        break
+        
+        # Flush remaining buffer
+        if buffer:
+            if in_think:
+                yield {"type": "reasoning_token", "content": buffer}
+                yield {"type": "reasoning_end"}
+            else:
+                yield {"type": "token", "content": buffer}
+    
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -1215,22 +1327,43 @@ for item in sorted(os.listdir(DATA_ROOT)):
         return f"🔧 {tool_name}...\n\n"
     
     def _extract_sources(self, search_result: str) -> list:
-        """Extract source paths from search result text"""
+        """Extract source paths from search result text with snippet previews and dedup."""
         import re
         sources = []
+        seen_paths = set()
         file_base = self.tenant.document_root if self.tenant else os.getenv("FILE_BASE", "/media/felix/RAG/1")
         
-        for match in re.finditer(r'\[(\d+)\]\s+(.+?)(?:\n|$)', search_result):
-            n = int(match.group(1))
-            path = match.group(2).strip()
-            if path:
-                from urllib.parse import quote
-                encoded = quote(f"{file_base}/{path}", safe="/:@")
-                sources.append({
-                    "n": n,
-                    "path": path,
-                    "display_path": f"/{path}",
-                    "local_url": f"http://localhost:11436/open?path={encoded}"
-                })
+        # Parse [N] path\nsnippet blocks
+        blocks = re.split(r'(?=\[\d+\]\s)', search_result)
+        for block in blocks:
+            m = re.match(r'\[(\d+)\]\s+(.+?)(?:\n([\s\S]*?))?$', block.strip())
+            if not m:
+                continue
+            n = int(m.group(1))
+            path = m.group(2).strip()
+            snippet = (m.group(3) or "").strip()[:150]
+            
+            if not path or path in seen_paths:
+                continue
+            seen_paths.add(path)
+            
+            from urllib.parse import quote
+            encoded = quote(f"{file_base}/{path}", safe="/:@")
+            
+            # Build display name: folder/filename
+            parts = path.rsplit("/", 2)
+            if len(parts) >= 2:
+                display_name = f"{parts[-2]}/{parts[-1]}"
+            else:
+                display_name = parts[-1]
+            
+            sources.append({
+                "n": n,
+                "path": path,
+                "display_name": display_name,
+                "display_path": f"/{path}",
+                "snippet_preview": snippet,
+                "local_url": f"http://localhost:11436/open?path={encoded}"
+            })
         
         return sources

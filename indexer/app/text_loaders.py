@@ -98,6 +98,97 @@ def read_msg(path: str) -> str:
     return "\n".join(fields + ["", body]).strip()
 
 
+def extract_pdf_metadata(path: str) -> dict:
+    """Extract metadata from PDF (author, title, creation date, producer)."""
+    meta = {}
+    try:
+        import fitz
+        doc = fitz.open(path)
+        info = doc.metadata or {}
+        if info.get("author"):
+            meta["author"] = info["author"][:200]
+        if info.get("title"):
+            meta["title"] = info["title"][:300]
+        if info.get("creationDate"):
+            meta["creation_date"] = info["creationDate"][:50]
+        if info.get("producer"):
+            meta["producer"] = info["producer"][:200]
+        if info.get("subject"):
+            meta["subject"] = info["subject"][:300]
+        meta["page_count"] = len(doc)
+        doc.close()
+    except Exception as e:
+        meta["_meta_error"] = str(e)[:100]
+    return meta
+
+
+def extract_docx_metadata(path: str) -> dict:
+    """Extract metadata from DOCX (author, title, created, modified)."""
+    meta = {}
+    try:
+        doc = Document(path)
+        props = doc.core_properties
+        if props.author:
+            meta["author"] = str(props.author)[:200]
+        if props.title:
+            meta["title"] = str(props.title)[:300]
+        if props.subject:
+            meta["subject"] = str(props.subject)[:300]
+        if props.created:
+            meta["creation_date"] = props.created.isoformat()
+        if props.modified:
+            meta["modified_date"] = props.modified.isoformat()
+        if props.last_modified_by:
+            meta["last_modified_by"] = str(props.last_modified_by)[:200]
+    except Exception as e:
+        meta["_meta_error"] = str(e)[:100]
+    return meta
+
+
+def extract_eml_metadata(path: str) -> dict:
+    """Extract email headers as structured metadata from EML file."""
+    import email
+    import email.policy
+    meta = {}
+    try:
+        with open(path, "rb") as f:
+            msg = email.message_from_binary_file(f, policy=email.policy.default)
+        if msg.get("Subject"):
+            meta["email_subject"] = str(msg["Subject"])[:300]
+        if msg.get("From"):
+            meta["email_from"] = str(msg["From"])[:200]
+        if msg.get("To"):
+            meta["email_to"] = str(msg["To"])[:500]
+        if msg.get("Date"):
+            meta["email_date"] = str(msg["Date"])[:50]
+        if msg.get("Cc"):
+            meta["email_cc"] = str(msg["Cc"])[:500]
+    except Exception as e:
+        meta["_meta_error"] = str(e)[:100]
+    return meta
+
+
+def extract_msg_metadata(path: str) -> dict:
+    """Extract email headers as structured metadata from MSG file."""
+    meta = {}
+    try:
+        m = extract_msg.Message(path)
+        m.process()
+        if getattr(m, "subject", None):
+            meta["email_subject"] = str(m.subject)[:300]
+        if getattr(m, "sender", None):
+            meta["email_from"] = str(m.sender)[:200]
+        if getattr(m, "to", None):
+            meta["email_to"] = str(m.to)[:500]
+        if getattr(m, "date", None):
+            meta["email_date"] = str(m.date)[:50]
+        if getattr(m, "cc", None):
+            meta["email_cc"] = str(m.cc)[:500]
+    except Exception as e:
+        meta["_meta_error"] = str(e)[:100]
+    return meta
+
+
 def read_eml_with_attachments(path: str) -> dict:
     """
     Extract text from .eml file including attachments with OCR.

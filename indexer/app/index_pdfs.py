@@ -6,6 +6,7 @@ from sentence_transformers import SentenceTransformer
 
 from .pdf_extract import extract_pdf_text
 from .chunking import chunk_text
+from .text_loaders import extract_pdf_metadata
 from .hashing import sha1_file, file_stat
 from .manifest import Manifest, ManifestRow
 from .chroma_store import ChromaStore
@@ -31,12 +32,13 @@ def rel_parts(root, full):
 
 def process_pdf(root, path, chunk_size, overlap):
     pages = extract_pdf_text(path)
+    pdf_meta = extract_pdf_metadata(path)
     items = []
     for p in pages:
         chunks = chunk_text(p["text"], chunk_size, overlap)
         for ci, ch in enumerate(chunks):
             items.append((p["page"], ci, ch))
-    return items
+    return items, pdf_meta
 
 def main():
     ROOT = os.getenv("ROOT_DIR", "/data")
@@ -73,11 +75,12 @@ def main():
                 return ("skipped", path, 0)
 
             h = sha1_file(path)
-            items = process_pdf(ROOT, path, CHUNK_SIZE, OVERLAP)
+            items, pdf_meta = process_pdf(ROOT, path, CHUNK_SIZE, OVERLAP)
             if not items:
                 return ("empty", path, 0)
 
             base_meta = rel_parts(ROOT, path)
+            base_meta.update(pdf_meta)
             ids, docs, metas = [], [], []
             for (page, ci, ch) in items:
                 chunk_id = f"{h}:{page}:{ci}"

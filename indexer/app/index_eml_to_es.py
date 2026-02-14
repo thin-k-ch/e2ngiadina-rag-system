@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from elasticsearch import Elasticsearch, helpers
 
-from indexer.app.text_loaders import read_eml_with_attachments, read_text_bytes
+from indexer.app.text_loaders import read_eml_with_attachments, read_text_bytes, extract_eml_metadata
 
 ES_URL = os.getenv("ES_URL", "http://localhost:9200")
 ES_INDEX = os.getenv("ES_INDEX", "rag_files_v1")
@@ -95,6 +95,9 @@ def process_eml_file(path, root_dir):
         file_hash = get_file_hash(path)
         stat = get_file_stat(path)
         
+        # Extract email metadata (From, To, Subject, Date)
+        email_meta = extract_eml_metadata(path)
+        
         # Build ES document
         doc = {
             "content": text,
@@ -109,7 +112,9 @@ def process_eml_file(path, root_dir):
                 "mtime": stat["mtime"],
                 "indexed_at": __import__('time').time(),
                 "attachment_count": len(attachments),
-                "attachment_names": [a.get("filename", "unknown") for a in attachments if a.get("text")]
+                "attachment_names": [a.get("filename", "unknown") for a in attachments if a.get("text")],
+                "document_type": "email",
+                **email_meta
             }
         }
         

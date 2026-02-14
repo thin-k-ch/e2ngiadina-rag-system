@@ -63,7 +63,11 @@ def _normalize_delta_content(v) -> str:
             return json.dumps(v, ensure_ascii=False)
         return str(inner)
     # fallback: stringify any other type
-    return str(v)
+    return ""
+
+def _ollama_chunk(model: str, content: str) -> str:
+    """Create an Ollama-format ndjson streaming chunk."""
+    return json.dumps({"model": model, "message": {"role": "assistant", "content": content}, "done": False}) + "\n"
 
 def _sse_chunk(rid: str, created: int, model: str, delta: dict, finish_reason=None) -> str:
     safe_delta = {}
@@ -366,43 +370,82 @@ async def ollama_chat(request: Request, x_tenant_id: str | None = Header(default
     agent_instance = ReactAgent(model=selected_model, tenant=tenant)
     
     async def stream_ollama():
+        in_thinking = False
+        in_reasoning = False
         try:
             async for event in agent_instance.run(query=user_text, chat_history=chat_history):
                 etype = event.get("type")
-                if etype in ("phase", "token"):
+                
+                if etype == "thinking_start":
+                    in_thinking = True
+                    yield _ollama_chunk(model_name, "<details>\n<summary>🧠 Recherche & Analyse</summary>\n\n")
+                
+                elif etype == "thinking_end":
+                    steps = event.get("steps", 0)
+                    elapsed = event.get("elapsed", 0)
+                    yield _ollama_chunk(model_name, f"\n*{steps} Schritte, {elapsed}s*\n\n</details>\n\n")
+                    in_thinking = False
+                
+                elif etype == "keepalive":
+                    elapsed = event.get("elapsed", 0)
+                    yield _ollama_chunk(model_name, f"  ⏳ *Denke nach... ({elapsed}s)*\n\n")
+                
+                elif etype == "phase":
                     content = event.get("content", "")
                     if content:
-                        chunk = json.dumps({
-                            "model": model_name,
-                            "message": {"role": "assistant", "content": content},
-                            "done": False
-                        })
-                        yield chunk + "\n"
+                        yield _ollama_chunk(model_name, content)
+                
+                elif etype == "tool_call":
+                    name = event.get("name", "")
+                    args = event.get("args", {})
+                    args_short = json.dumps(args, ensure_ascii=False)[:120]
+                    yield _ollama_chunk(model_name, f"  🔧 `{name}` {args_short}\n\n")
+                
+                elif etype == "tool_result":
+                    name = event.get("name", "")
+                    summary = event.get("summary", "")
+                    yield _ollama_chunk(model_name, f"  ✅ {name} → {summary}\n\n")
+                
+                elif etype == "reasoning_start":
+                    in_reasoning = True
+                    yield _ollama_chunk(model_name, "<details>\n<summary>💭 Überlegung</summary>\n\n")
+                
+                elif etype == "reasoning_token":
+                    yield _ollama_chunk(model_name, event.get("content", ""))
+                
+                elif etype == "reasoning_end":
+                    yield _ollama_chunk(model_name, "\n\n</details>\n\n")
+                    in_reasoning = False
+                
+                elif etype == "token":
+                    content = event.get("content", "")
+                    if content:
+                        yield _ollama_chunk(model_name, content)
+                
                 elif etype == "sources":
                     src_list = event.get("sources", [])
                     if src_list:
                         source_lines = []
                         for s in src_list:
                             n = s.get('n', '?')
-                            dp = s.get('display_path', s.get('path', ''))
+                            name = s.get('display_name', s.get('display_path', s.get('path', '')))
                             url = s.get('local_url', '')
+                            preview = s.get('snippet_preview', '')
                             if url:
-                                source_lines.append(f"[{n}] [{dp}]({url})")
+                                line = f"**[{n}]** [{name}]({url})"
                             else:
-                                source_lines.append(f"[{n}] {dp}")
-                        src_text = "\n\nQuellen:\n" + "\n".join(source_lines)
-                        chunk = json.dumps({
-                            "model": model_name,
-                            "message": {"role": "assistant", "content": src_text},
-                            "done": False
-                        })
-                        yield chunk + "\n"
+                                line = f"**[{n}]** {name}"
+                            if preview:
+                                line += f"\n  *{preview[:120]}...*" if len(preview) > 120 else f"\n  *{preview}*"
+                            source_lines.append(line)
+                        src_text = "\n\n---\n📚 **Quellen:**\n\n" + "\n\n".join(source_lines) + "\n"
+                        yield _ollama_chunk(model_name, src_text)
         except LLMError as e:
             err_msg = f"\n\n⚠️ Fehler: {e}\nBitte erneut versuchen oder schnelleres Modell wählen."
-            yield json.dumps({"model": model_name, "message": {"role": "assistant", "content": err_msg}, "done": False}) + "\n"
+            yield _ollama_chunk(model_name, err_msg)
         except Exception as e:
             err_msg = f"\n\n⚠️ Unerwarteter Fehler: {type(e).__name__}: {e}"
-            yield json.dumps({"model": model_name, "message": {"role": "assistant", "content": err_msg}, "done": False}) + "\n"
+            yield _ollama_chunk(model_name, err_msg)
         
         # Final done message
         yield json.dumps({"model": model_name, "message": {"role": "assistant", "content": ""}, "done": True}) + "\n"

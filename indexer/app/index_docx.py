@@ -8,7 +8,7 @@ from .chunking import chunk_text
 from .hashing import sha1_file, file_stat
 from .manifest import Manifest, ManifestRow
 from .chroma_store import ChromaStore
-from .text_loaders import read_docx
+from .text_loaders import read_docx, extract_docx_metadata
 
 def log(path, msg):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -39,6 +39,7 @@ def process_docx(root, path, chunk_size, overlap):
         
         chunks = chunk_text(text, chunk_size, overlap)
         base_meta = rel_parts(root, path)
+        base_meta.update(extract_docx_metadata(path))
         items = []
         for ci, chunk in enumerate(chunks):
             chunk_id = f"{h}:0:{ci}"
