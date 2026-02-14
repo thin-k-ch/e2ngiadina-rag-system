@@ -16,7 +16,7 @@ fi
 # Step 1: Build code services (agent_api + runner) from latest source
 echo ""
 echo "� Building code services (agent_api, runner)..."
-docker compose build agent_api runner 2>&1 | tail -5
+docker compose build --build-arg CACHEBUST=$(date +%s) agent_api runner 2>&1 | tail -5
 
 # Step 2: Start infrastructure (Ollama, ES, Kibana, OpenWebUI) – these auto-restart
 # Step 3: Start code services with force-recreate (always fresh from latest build)
