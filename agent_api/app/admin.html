@@ -158,7 +158,7 @@
               <input type="radio" name="strategy-mode" value="planner" id="cfg-mode-planner" class="accent-blue-500">
               <div>
                 <div class="text-sm font-bold text-white">📋 Planner</div>
-                <div class="text-xs text-slate-400">Cloud erstellt kompletten Suchplan. Lokal nur Schreiben.</div>
+                <div class="text-xs text-slate-400">Cloud erstellt kompletten Suchplan. Lokal nur Lesen, Analysieren und Schreiben.</div>
                 <div class="text-xs text-amber-400 mt-0.5">Für kleine lokale Modelle (qwen2.5:3b)</div>
               </div>
             </label>
@@ -389,7 +389,7 @@ function toggleOnlineFields() {
     const model = document.getElementById('cfg-online-model').value || 'gpt-4o-mini';
     const mode = document.querySelector('input[name="strategy-mode"]:checked')?.value || 'routing';
     const modeLabel = mode === 'planner' ? '📋 Planner' : '🔀 Routing';
-    label.textContent = `Aktiviert – ${modeLabel} (${model})`;
+    label.textContent = `Aktiviert – ${modeLabel} | Online: ${model}`;
     label.className = 'text-sm font-semibold text-emerald-400';
   } else {
     label.textContent = 'Deaktiviert (komplett offline)';
