@@ -174,6 +174,34 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_memory",
+            "description": "Verwaltet das Langzeit-Gedächtnis. Speichert Notizen, Fakten oder Anweisungen die sich der Agent "
+                           "über Sitzungen hinweg merken soll. Nutze dies wenn der Benutzer sagt 'Merke dir...', "
+                           "'Vergiss...', 'Erinnerung...', oder wenn wichtige Projektfakten festgehalten werden sollen.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "Aktion: 'save' (neue Notiz speichern), 'list' (alle Notizen anzeigen), 'search' (Notizen suchen), 'delete' (Notiz löschen)",
+                        "enum": ["save", "list", "search", "delete"]
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Bei 'save': Text der Notiz. Bei 'search'/'delete': Suchbegriff oder ID."
+                    },
+                    "tags": {
+                        "type": "string",
+                        "description": "Optionale Tags, kommagetrennt (z.B. 'projekt,kontakt,termin')"
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -192,6 +220,7 @@ TOOLS (nutze sie aktiv – vermute nicht, suche und lies!):
 - list_files: Dateien/Ordner im Projektarchiv auflisten
 - read_file: Datei direkt vom Dateisystem lesen (CSV, TXT, Log)
 - web_search: Im Internet suchen (Normen, Technologie, Nachrichten)
+- manage_memory: Langzeit-Gedächtnis verwalten (Notizen speichern/abrufen/löschen über Sitzungen hinweg)
 
 ARBEITSWEISE:
 1. Frage analysieren → passende Tools wählen
@@ -521,6 +550,59 @@ async def _execute_web_search(args: dict, tenant=None) -> str:
             "Beantworte die Frage basierend auf deinem Trainings-Wissen.")
 
 
+async def _execute_manage_memory(args: dict, tenant=None) -> str:
+    """Execute manage_memory tool – persistent notes per tenant."""
+    from .memory_store import get_memory_store
+    
+    store = get_memory_store()
+    tenant_id = tenant.short_name if tenant else "default"
+    action = args.get("action", "list")
+    content = args.get("content", "")
+    tags_str = args.get("tags", "")
+    tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
+    
+    if action == "save":
+        if not content:
+            return "Fehler: Kein Inhalt zum Speichern angegeben."
+        entry = store.add(tenant_id, content, tags)
+        return f"✅ Notiz gespeichert (ID: {entry['id']}): {content}"
+    
+    elif action == "list":
+        memories = store.list_all(tenant_id)
+        if not memories:
+            return "📋 Keine Notizen vorhanden."
+        lines = [f"📋 {len(memories)} Notizen gespeichert:\n"]
+        for m in memories:
+            tags_info = f" [{', '.join(m['tags'])}]" if m.get("tags") else ""
+            lines.append(f"- [{m['id']}] {m['content']}{tags_info}")
+        return "\n".join(lines)
+    
+    elif action == "search":
+        if not content:
+            return "Fehler: Kein Suchbegriff angegeben."
+        results = store.search(tenant_id, content)
+        if not results:
+            return f"🔍 Keine Notizen gefunden für '{content}'."
+        lines = [f"🔍 {len(results)} Notizen gefunden für '{content}':\n"]
+        for m in results:
+            lines.append(f"- [{m['id']}] {m['content']}")
+        return "\n".join(lines)
+    
+    elif action == "delete":
+        if not content:
+            return "Fehler: Kein Suchbegriff oder ID zum Löschen angegeben."
+        # Try delete by ID first
+        if store.delete(tenant_id, content):
+            return f"🗑️ Notiz {content} gelöscht."
+        # Try delete by keyword
+        count = store.delete_by_content(tenant_id, content)
+        if count > 0:
+            return f"🗑️ {count} Notiz(en) mit '{content}' gelöscht."
+        return f"❌ Keine Notiz gefunden mit ID oder Stichwort '{content}'."
+    
+    return f"Unbekannte Aktion: {action}. Verwende 'save', 'list', 'search' oder 'delete'."
+
+
 TOOL_EXECUTORS = {
     "search_documents": _execute_search,
     "read_document": _execute_read_document,
@@ -529,6 +611,7 @@ TOOL_EXECUTORS = {
     "list_files": _execute_list_files,
     "read_file": _execute_read_file,
     "web_search": _execute_web_search,
+    "manage_memory": _execute_manage_memory,
 }
 
 # ---------------------------------------------------------------------------
@@ -606,6 +689,13 @@ class ReactAgent:
                 system_content += "\n\n" + self.tenant.system_prompt_extra.strip()
         if system_prompt_extra:
             system_content += "\n\n" + system_prompt_extra
+        
+        # Inject long-term memories into system prompt
+        from .memory_store import get_memory_store
+        tenant_id = self.tenant.short_name if self.tenant else "default"
+        memory_text = get_memory_store().format_for_prompt(tenant_id)
+        if memory_text:
+            system_content += f"\n\nLANGZEIT-GEDÄCHTNIS (gespeicherte Notizen – berücksichtige diese bei deinen Antworten):\n{memory_text}"
         
         # Query analysis: inject tool hints for specific query types
         tool_hint = self._analyze_query(query)
@@ -1301,6 +1391,16 @@ for item in sorted(os.listdir(DATA_ROOT)):
         for p in skip_patterns:
             if re.search(p, q):
                 return False
+        # Skip forced doc search for memory operations
+        memory_patterns = [
+            r'merk\s*dir', r'vergiss', r'erinner', r'notiz',
+            r'was\s+(hast|weisst)\s+du\s+(dir\s+)?gemerkt',
+            r'zeig.*notiz', r'lösch.*notiz',
+        ]
+        for p in memory_patterns:
+            if re.search(p, q):
+                print(f"⏭️ _needs_search=False: memory operation")
+                return False
         # Skip forced doc search when user explicitly wants web search
         web_patterns = [
             r'(suche|such)\s*(im\s+)?internet',
@@ -1336,6 +1436,10 @@ for item in sorted(os.listdir(DATA_ROOT)):
         elif tool_name == "web_search":
             q = args.get("query", "")[:60]
             return f"🌐 Web-Suche: *{q}*...\n\n"
+        elif tool_name == "manage_memory":
+            action = args.get("action", "")
+            labels = {"save": "💾 Speichere Notiz", "list": "📋 Notizen abrufen", "search": "🔍 Notizen suchen", "delete": "🗑️ Notiz löschen"}
+            return f"{labels.get(action, '🧠 Gedächtnis')}...\n\n"
         return f"🔧 {tool_name}...\n\n"
     
     def _extract_sources(self, search_result: str) -> list:

@@ -56,11 +56,13 @@ services:
       - ES_HOST=http://elasticsearch:9200
       - CHROMA_HOST=localhost:8000
       - SEARXNG_URL=http://searxng:8080
+      - MEMORY_PATH=/memories
     volumes:
       - /media/felix/RAG/1/volumes/chroma:/chroma
       - /media/felix/RAG/1/volumes/logs:/logs
       - /media/felix/RAG/1/volumes/state:/state
       - /media/felix/RAG/1:/media/felix/RAG/1
+      - /media/felix/RAG/1/volumes/memories:/memories
       - ./tenants:/app/tenants:ro
     depends_on:
       - ollama
