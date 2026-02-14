@@ -411,6 +411,84 @@ def _find_relevant_section(content: str, query_hint: str, max_chars: int) -> str
     return prefix + section + suffix
 
 
+_PRECISION_KEYWORDS = {"wortgenau", "wörtlich", "exakt", "zitiere", "zitieren", "originaltext", "original-text", "wortwörtlich"}
+
+def _wants_precision(query: str) -> bool:
+    """Check if the user wants word-for-word extraction."""
+    q = query.lower()
+    return any(kw in q for kw in _PRECISION_KEYWORDS)
+
+
+async def _extract_via_pdfplumber(real_path: str, search_terms: list[str]) -> str:
+    """Use pdfplumber via the runner to extract relevant pages from a PDF.
+    Returns the extracted text or None if it fails."""
+    import aiohttp
+    
+    runner_url = os.getenv("PYRUNNER_URL", "http://runner:9000/run")
+    # Convert path to runner mount path (/data/ = /media/felix/RAG/1/)
+    if real_path.startswith("/media/felix/RAG/1/"):
+        data_path = real_path.replace("/media/felix/RAG/1/", "/data/")
+    elif real_path.startswith("/"):
+        # Virtual path like /SBB TFK 2020 PJ... → /data/SBB TFK 2020 PJ...
+        data_path = "/data" + real_path
+    else:
+        data_path = "/data/" + real_path
+    
+    # Build search terms for page filtering
+    terms_str = ", ".join(f'"{t}"' for t in search_terms[:5])
+    
+    # Use word stems (first 5+ chars) for fuzzy matching (handles singular/plural)
+    stems = list(set(t.lower()[:min(len(t), 6)] for t in search_terms[:8] if len(t) >= 4))
+    stems_py = ", ".join(f'"{s}"' for s in stems)
+    
+    code = f'''import pdfplumber
+pdf = pdfplumber.open("{data_path}")
+stems = [{stems_py}]
+matched = []
+for i in range(len(pdf.pages)):
+    text = pdf.pages[i].extract_text() or ""
+    tl = text.lower()
+    hits = 0
+    for s in stems:
+        if s in tl:
+            hits = hits + 1
+    if hits >= 2:
+        matched.append((i+1, hits, text))
+
+matched.sort(key=lambda x: -x[1])
+
+if matched:
+    for m in matched[:3]:
+        print("=== SEITE " + str(m[0]) + " (von " + str(len(pdf.pages)) + ", " + str(m[1]) + " Treffer) ===")
+        print(m[2])
+        print()
+else:
+    for i in range(min(5, len(pdf.pages))):
+        text = pdf.pages[i].extract_text() or ""
+        print("=== SEITE " + str(i+1) + " ===")
+        print(text[:3000])
+        print()
+pdf.close()
+'''
+    
+    print(f"📄 pdfplumber: data_path={data_path[-80:]}")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(runner_url, json={"code": code}, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                result = await resp.json()
+                if result.get("ok") and result.get("stdout"):
+                    output = result["stdout"]
+                    print(f"📄 pdfplumber: extracted {len(output)} chars")
+                    return f"=== ORIGINALTEXT aus PDF (pdfplumber) ===\n{output}"
+                else:
+                    err = result.get("error", "") or result.get("stderr", "unknown error")
+                    print(f"⚠️ pdfplumber failed: {err[:500]}")
+                    return None
+    except Exception as e:
+        print(f"⚠️ pdfplumber exception: {e}")
+        return None
+
+
 async def _execute_python(args: dict, tenant=None) -> str:
     """Execute execute_python tool"""
     code = args.get("code", "")
@@ -915,6 +993,29 @@ WICHTIG für answer_hint:
         elapsed = int(time.time() - start_time)
         yield {"type": "thinking_end", "steps": steps, "elapsed": elapsed}
         
+        # PRECISION MODE: If user wants exact text + we have a PDF source, bypass LLM
+        precision = _wants_precision(query)
+        if precision and all_sources:
+            # Find the first PDF source (may not be the top one)
+            pdf_src = next((s for s in all_sources if s.get("path", "").lower().endswith(".pdf")), None)
+            if pdf_src:
+                top_path = pdf_src.get("path", "")
+                print(f"🔬 Precision mode: extracting from {top_path[-60:]}")
+            if pdf_src:
+                import re
+                search_terms = [w for w in re.findall(r'\w+', query) if len(w) >= 4]
+                yield {"type": "phase", "content": f"🔬 Präzisionsmodus: Extrahiere Originaltext via PDF-Parser...\n\n"}
+                pdf_text = await _extract_via_pdfplumber(top_path, search_terms)
+                if pdf_text:
+                    display_name = pdf_src.get("display_name", top_path.split("/")[-1])
+                    header = f"📄 **Originaltext aus: {display_name}**\n\n"
+                    yield {"type": "token", "content": header}
+                    yield {"type": "token", "content": pdf_text.replace("=== ORIGINALTEXT aus PDF (pdfplumber) ===\n", "")}
+                    final_sources = read_sources if read_sources else all_sources[:3]
+                    yield {"type": "sources", "sources": final_sources}
+                    yield {"type": "done"}
+                    return
+        
         # Step 3: Generate final answer – use same format as ReAct loop
         focus = plan.get("focus", "")
         answer_format = plan.get("answer_format", "")
@@ -1058,6 +1159,7 @@ WICHTIG für answer_hint:
         # Collect sources for linking
         all_sources = []
         forced_search_done = False  # Track if we did a forced search (to give LLM extra step for read_document)
+        has_read_document = False   # Track if read_document was ever called (for forced read fallback)
         thinking_active = False
         thinking_start_time = None
         thinking_steps = 0
@@ -1149,6 +1251,8 @@ WICHTIG für answer_hint:
                             # Collect sources from search results
                             if tool_name == "search_documents":
                                 all_sources.extend(self._extract_sources(result))
+                            elif tool_name == "read_document":
+                                has_read_document = True
                         except Exception as e:
                             result = f"Fehler bei {tool_name}: {str(e)}"
                             print(f"❌ Tool error: {e}")
@@ -1172,6 +1276,48 @@ WICHTIG für answer_hint:
             else:
                 # LLM wants to answer directly (no tool call)
                 if step > 0 and not (step == 1 and forced_search_done):
+                    # Before answering: if we have sources but never read a document, force read
+                    if not has_read_document and all_sources and step < max_steps - 1:
+                        top_src = all_sources[0]
+                        top_path = top_src.get("path", "")
+                        if top_path:
+                            print(f"🔄 Auto-read (no read_document yet): {top_path[-60:]}")
+                            yield {"type": "phase", "content": f"📄 Lese: *{top_src.get('display_name', top_path)[:50]}*...\n\n"}
+                            
+                            # PRECISION MODE: extract via pdfplumber and stream DIRECTLY to user
+                            if _wants_precision(query) and top_path.lower().endswith(".pdf"):
+                                import re
+                                search_terms = [w for w in re.findall(r'\w+', query) if len(w) >= 4]
+                                yield {"type": "phase", "content": f"🔬 Präzisionsmodus: Extrahiere Originaltext via PDF-Parser...\n\n"}
+                                pdf_text = await _extract_via_pdfplumber(top_path, search_terms)
+                                if pdf_text:
+                                    thinking_steps += 1
+                                    yield {"type": "tool_result", "name": "read_document", "summary": f"{len(pdf_text)} Zeichen (PDF-Parser)"}
+                                    # End thinking, stream pdfplumber output DIRECTLY
+                                    if thinking_active:
+                                        elapsed = int(time.time() - thinking_start_time) if thinking_start_time else 0
+                                        yield {"type": "thinking_end", "steps": thinking_steps, "elapsed": elapsed}
+                                        thinking_active = False
+                                    display_name = top_src.get("display_name", top_path.split("/")[-1])
+                                    header = f"📄 **Originaltext aus: {display_name}**\n\n"
+                                    yield {"type": "token", "content": header}
+                                    # Stream the extracted text directly (bypass LLM!)
+                                    yield {"type": "token", "content": pdf_text.replace("=== ORIGINALTEXT aus PDF (pdfplumber) ===\n", "")}
+                                    yield {"type": "sources", "sources": all_sources[:3]}
+                                    yield {"type": "done"}
+                                    return
+                            
+                            # Normal mode: read from ES
+                            doc_result = await _execute_read_document({"path": top_path, "query_hint": query}, tenant=self.tenant)
+                            has_read_document = True
+                            thinking_steps += 1
+                            yield {"type": "tool_result", "name": "read_document", "summary": f"{len(doc_result)} Zeichen"}
+                            messages.append({
+                                "role": "assistant", "content": "",
+                                "tool_calls": [{"function": {"name": "read_document", "arguments": {"path": top_path}}}]
+                            })
+                            messages.append({"role": "tool", "content": doc_result})
+                            continue
                     # Already have tool context → stream final answer
                     if thinking_active:
                         elapsed = int(time.time() - thinking_start_time) if thinking_start_time else 0
@@ -1188,7 +1334,18 @@ WICHTIG für answer_hint:
                             print(f"🔄 Forced read_document (LLM skipped): {top_path[-60:]}")
                             yield {"type": "phase", "content": f"📄 Lese: *{top_src.get('display_name', top_path)[:50]}*...\n\n"}
                             yield {"type": "tool_call", "name": "read_document", "args": {"path": top_path}}
-                            doc_result = await _execute_read_document({"path": top_path, "query_hint": query}, tenant=self.tenant)
+                            
+                            # Precision mode: use pdfplumber for word-for-word extraction
+                            doc_result = None
+                            if _wants_precision(query) and top_path.lower().endswith(".pdf"):
+                                import re
+                                search_terms = [w for w in re.findall(r'\w+', query) if len(w) >= 4]
+                                yield {"type": "phase", "content": f"🔬 Präzisionsmodus: Extrahiere Originaltext via PDF-Parser...\n\n"}
+                                doc_result = await _extract_via_pdfplumber(top_path, search_terms)
+                            
+                            if not doc_result:
+                                doc_result = await _execute_read_document({"path": top_path, "query_hint": query}, tenant=self.tenant)
+                            
                             thinking_steps += 1
                             summary = f"{len(doc_result)} Zeichen"
                             yield {"type": "tool_result", "name": "read_document", "summary": summary}
@@ -1198,6 +1355,12 @@ WICHTIG für answer_hint:
                                 "tool_calls": [{"function": {"name": "read_document", "arguments": {"path": top_path}}}]
                             })
                             messages.append({"role": "tool", "content": doc_result})
+                            # Extra instruction for precision mode
+                            if _wants_precision(query):
+                                messages.append({"role": "system", "content": 
+                                    "WICHTIG: Der obige Text wurde direkt aus dem Original-PDF extrahiert. "
+                                    "Gib den relevanten Abschnitt EXAKT so wieder wie er oben steht. "
+                                    "Erfinde NICHTS dazu, paraphrasiere NICHT. Kopiere den Text 1:1."})
                     forced_search_done = False
                     continue
                 elif step == 0 and not fs_code and self._needs_search(query):
