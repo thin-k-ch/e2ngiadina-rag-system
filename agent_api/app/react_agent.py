@@ -659,12 +659,23 @@ class ReactAgent:
         self.model_answer = model or os.getenv("OLLAMA_MODEL_ANSWER", "llama4:latest")
         # Strategy model: runtime config > env var > same as answer model
         from .runtime_config import get_runtime_config
-        strategy = get_runtime_config().get("strategy_model", "")
+        cfg = get_runtime_config()
+        strategy = cfg.get("strategy_model", "")
         if not strategy:
             strategy = os.getenv("OLLAMA_MODEL_STRATEGY", "")
         self.model_strategy = strategy if strategy else self.model_answer
-        self.num_batch = get_runtime_config().get("num_batch", 1024)
-        self.num_ctx_max = get_runtime_config().get("num_ctx_max", 131072)
+        self.num_batch = cfg.get("num_batch", 1024)
+        self.num_ctx_max = cfg.get("num_ctx_max", 131072)
+        # Online model for strategy (fast cloud routing, no doc content sent)
+        self._online_enabled = bool(cfg.get("online_model_enabled", False))
+        self._online_api_url = cfg.get("online_api_url", "https://api.openai.com/v1")
+        self._online_api_key = cfg.get("online_api_key", "")
+        self._online_model = cfg.get("online_model_name", "gpt-4o-mini")
+        if self._online_enabled and self._online_api_key:
+            print(f"☁️ Online strategy: {self._online_model} via {self._online_api_url}")
+        elif self._online_enabled:
+            print(f"⚠️ Online strategy enabled but no API key set → falling back to local")
+            self._online_enabled = False
         # Expose .model for backward compat (used in _stream_with_thinking etc.)
         self.model = self.model_answer
         self.ollama_base = (ollama_base or os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")).rstrip("/")
@@ -965,23 +976,126 @@ class ReactAgent:
                 print(f"⚠️ Could not parse tool call: {match[:100]}")
         return tool_calls
     
-    async def _llm_with_tools(self, messages: list) -> dict:
-        """Non-streaming LLM call with tool definitions. Uses strategy model for fast routing.
-        Retries once on timeout/connection error.
-        Falls back to prompt-based tool calling if model returns 400 (no native tool support)."""
+    def _sanitize_messages_for_online(self, messages: list) -> list:
+        """Strip document content from messages for privacy-safe online routing.
+        Only user queries, system prompt (without memories), and tool call summaries are sent."""
+        sanitized = []
+        for m in messages:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            
+            if role == "system":
+                # Strip long-term memories and document-specific content from system prompt
+                # Keep only the core instructions up to the LANGZEIT-GEDÄCHTNIS marker
+                if "LANGZEIT-GEDÄCHTNIS" in content:
+                    content = content[:content.index("LANGZEIT-GEDÄCHTNIS")].rstrip()
+                sanitized.append({"role": "system", "content": content})
+            elif role == "tool":
+                # Replace tool results with a short summary – NO document content goes online
+                lines = content.split("\n")
+                summary_parts = []
+                if "Treffer" in content:
+                    for line in lines[:2]:
+                        if "Treffer" in line or "Suche" in line:
+                            summary_parts.append(line[:150])
+                    summary = " ".join(summary_parts) if summary_parts else f"[Tool-Ergebnis: {len(content)} Zeichen]"
+                else:
+                    summary = f"[Tool-Ergebnis: {len(content)} Zeichen]"
+                sanitized.append({"role": "user", "content": f"[Tool-Ergebnis]: {summary}"})
+            elif "tool_calls" in m:
+                # Keep tool call decisions (no sensitive data)
+                tc = m.get("tool_calls", [{}])[0]
+                func = tc.get("function", {})
+                sanitized.append({"role": "assistant", "content": f"Tool aufgerufen: {func.get('name', '')}({json.dumps(func.get('arguments', {}))})"})
+            elif role in ("user", "assistant"):
+                # User queries and assistant responses are OK (user typed them)
+                sanitized.append({"role": role, "content": content[:2000]})
+        return sanitized
+    
+    async def _llm_with_tools_online(self, messages: list) -> dict:
+        """Call an OpenAI-compatible API for fast tool routing. No document content is sent.
+        Returns response in Ollama format for compatibility."""
         import httpx
         
-        # Use strategy model for tool-calling (faster routing decisions)
+        sanitized = self._sanitize_messages_for_online(messages)
+        
+        # Convert TOOLS to OpenAI format
+        openai_tools = []
+        for tool in TOOLS:
+            openai_tools.append({
+                "type": "function",
+                "function": tool["function"]
+            })
+        
+        payload = {
+            "model": self._online_model,
+            "messages": sanitized,
+            "tools": openai_tools,
+            "tool_choice": "auto",
+            "temperature": 0.2,
+            "max_tokens": 1024,
+        }
+        
+        total_chars = sum(len(m.get("content", "")) for m in sanitized)
+        print(f"☁️ ReAct LLM (online): {total_chars} chars, model={self._online_model}")
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(
+                    f"{self._online_api_url.rstrip('/')}/chat/completions",
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self._online_api_key}",
+                        "Content-Type": "application/json",
+                    }
+                )
+                r.raise_for_status()
+                data = r.json()
+        except Exception as e:
+            print(f"⚠️ Online strategy failed: {e} → falling back to local")
+            return await self._llm_with_tools_local(messages)
+        
+        # Convert OpenAI response to Ollama format
+        choice = data.get("choices", [{}])[0]
+        msg = choice.get("message", {})
+        
+        ollama_msg = {
+            "role": msg.get("role", "assistant"),
+            "content": msg.get("content", "") or "",
+        }
+        
+        # Convert tool_calls from OpenAI → Ollama format
+        if msg.get("tool_calls"):
+            ollama_tc = []
+            for tc in msg["tool_calls"]:
+                func = tc.get("function", {})
+                args = func.get("arguments", "{}")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {"query": args}
+                ollama_tc.append({"function": {"name": func.get("name", ""), "arguments": args}})
+            ollama_msg["tool_calls"] = ollama_tc
+        
+        usage = data.get("usage", {})
+        print(f"☁️ Online response: tool_calls={len(msg.get('tool_calls', []))}, "
+              f"tokens={usage.get('total_tokens', '?')}")
+        
+        return {"message": ollama_msg, "done": True}
+    
+    async def _llm_with_tools_local(self, messages: list) -> dict:
+        """Local Ollama strategy call (original implementation)."""
+        import httpx
+        
         model = self.model_strategy
         use_prompt = self._use_prompt_tools_strategy
         
-        # Estimate tokens for dynamic context window
         total_chars = sum(len(m.get("content", "")) for m in messages)
         est_tokens = total_chars // 3
         num_ctx = max(4096, est_tokens + 4096 + 512)
         num_ctx = min(num_ctx, min(65536, self.num_ctx_max))
         
-        # For prompt-based tool calling, inject tool instructions into messages
         if use_prompt:
             return await self._llm_with_prompt_tools(messages, num_ctx, total_chars)
         
@@ -1002,7 +1116,7 @@ class ReactAgent:
         if total_chars > 20000:
             timeout = 300.0
         
-        print(f"🔧 ReAct LLM (strategy): {total_chars} chars, num_ctx={num_ctx}, model={model}")
+        print(f"🔧 ReAct LLM (strategy/local): {total_chars} chars, num_ctx={num_ctx}, model={model}")
         
         last_err = None
         for attempt in range(2):
@@ -1013,10 +1127,9 @@ class ReactAgent:
                     return r.json()
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 400:
-                    # Model doesn't support native tool-calling → switch to prompt-based
                     print(f"⚠️ Model {model} returned 400 with tools → switching to prompt-based tool calling")
                     self._use_prompt_tools_strategy = True
-                    _mark_prompt_tools(model)  # Cache for future requests
+                    _mark_prompt_tools(model)
                     return await self._llm_with_prompt_tools(messages, num_ctx, total_chars)
                 raise LLMError(f"HTTP {e.response.status_code}: {e}")
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadError) as e:
@@ -1025,11 +1138,17 @@ class ReactAgent:
                     print(f"⚠️ LLM call failed (attempt 1/2): {type(e).__name__}: {e}")
                     print(f"🔄 Retrying with +60s timeout...")
                     timeout += 60.0
-                    import asyncio
                     await asyncio.sleep(2)
                 else:
                     print(f"❌ LLM call failed (attempt 2/2): {type(e).__name__}: {e}")
         raise LLMError(f"LLM nicht erreichbar nach 2 Versuchen: {type(last_err).__name__}")
+    
+    async def _llm_with_tools(self, messages: list) -> dict:
+        """Non-streaming LLM call with tool definitions. Routes to online or local strategy model."""
+        # Route to online API if enabled (privacy-safe: no doc content sent)
+        if self._online_enabled:
+            return await self._llm_with_tools_online(messages)
+        return await self._llm_with_tools_local(messages)
     
     def _augment_messages_for_prompt_tools(self, messages: list) -> list:
         """Convert messages to prompt-based format (inject tool instructions, convert tool roles)."""

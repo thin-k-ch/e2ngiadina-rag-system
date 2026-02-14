@@ -16,6 +16,11 @@ class RuntimeConfig:
         "strategy_model": "",  # Empty = use same as answer model (no split)
         "num_batch": 1024,
         "num_ctx_max": 131072,
+        # Online model for strategy calls (fast tool-routing, no doc content sent)
+        "online_model_enabled": False,
+        "online_api_url": "https://api.openai.com/v1",  # OpenAI-compatible endpoint
+        "online_api_key": "",
+        "online_model_name": "gpt-4o-mini",  # Fast + cheap for routing
     }
 
     def __init__(self, path: str = None):

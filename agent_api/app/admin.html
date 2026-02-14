@@ -131,6 +131,44 @@
         <div id="cfg-strategy-info" class="text-sm text-slate-400 mt-2"></div>
       </div>
 
+      <!-- Online Model -->
+      <div class="card">
+        <div class="section-title">☁️ Online-Modell (Cloud Strategy)</div>
+        <p class="text-sm text-slate-400 mb-4">Nutzt eine Cloud-API für schnelle Tool-Routing-Entscheidungen. <strong class="text-amber-400">Keine Dokument-Inhalte werden gesendet</strong> – nur die User-Frage und Tool-Definitionen.</p>
+        <div class="flex items-center gap-3 mb-4">
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" id="cfg-online-enabled" class="sr-only peer" onchange="toggleOnlineFields()">
+            <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+          </label>
+          <span class="text-sm font-semibold" id="online-status-label">Deaktiviert (komplett offline)</span>
+        </div>
+        <div id="online-fields" style="display:none;">
+          <div class="mb-3">
+            <label class="text-sm text-slate-400 block mb-1">API-URL (OpenAI-kompatibel)</label>
+            <input type="text" id="cfg-online-url" class="w-full" placeholder="https://api.openai.com/v1">
+          </div>
+          <div class="mb-3">
+            <label class="text-sm text-slate-400 block mb-1">API-Key</label>
+            <input type="password" id="cfg-online-key" class="w-full" placeholder="sk-...">
+          </div>
+          <div class="mb-3">
+            <label class="text-sm text-slate-400 block mb-1">Modell</label>
+            <input type="text" id="cfg-online-model" class="w-full" placeholder="gpt-4o-mini">
+          </div>
+          <div class="p-3 rounded-lg bg-slate-800 border border-slate-600 text-xs text-slate-400 mb-3">
+            <strong class="text-amber-400">🔒 Privacy-Garantie:</strong> Nur folgende Daten gehen an die Cloud-API:
+            <ul class="mt-1 space-y-0.5">
+              <li>✅ User-Frage (was du im Chat eingibst)</li>
+              <li>✅ Tool-Definitionen (welche Tools verfügbar sind)</li>
+              <li>✅ System-Prompt (allgemeine Anweisungen)</li>
+              <li>❌ <strong>Keine</strong> Dokument-Inhalte, Suchergebnisse oder Datei-Inhalte</li>
+              <li>❌ <strong>Keine</strong> Langzeit-Notizen / Gedächtnis</li>
+            </ul>
+          </div>
+          <button class="btn btn-primary" onclick="saveConfig()">💾 Speichern</button>
+        </div>
+      </div>
+
       <!-- Performance -->
       <div class="card">
         <div class="section-title">⚡ Performance</div>
@@ -152,6 +190,7 @@
           <li>• <strong>Mandant wechseln</strong>: Auch per Chat möglich: <code class="bg-slate-800 px-1.5 py-0.5 rounded text-blue-300">"Wechsle zu tfk18"</code></li>
           <li>• <strong>Mandanten auflisten</strong>: <code class="bg-slate-800 px-1.5 py-0.5 rounded text-blue-300">"Welche Mandanten haben wir?"</code></li>
           <li>• <strong>Hilfsmodell</strong>: Leer = Hauptmodell für alles. Empfehlung: <code class="bg-slate-800 px-1.5 py-0.5 rounded text-blue-300">qwen2.5:3b</code> für schnelle Tool-Entscheidungen.</li>
+          <li>• <strong>Online-Modell</strong>: Überschreibt das lokale Hilfsmodell für Routing-Entscheidungen. Finale Antwort kommt immer vom lokalen Modell.</li>
           <li>• <strong>num_batch</strong>: Höher = schnellere Prompt-Verarbeitung, mehr VRAM. Standard: 1024.</li>
         </ul>
       </div>
@@ -292,6 +331,12 @@ async function loadDashboard() {
   if (config) {
     document.getElementById('cfg-num-batch').value = config.num_batch || 1024;
     document.getElementById('cfg-num-ctx-max').value = config.num_ctx_max || 131072;
+    // Online model fields
+    document.getElementById('cfg-online-enabled').checked = !!config.online_model_enabled;
+    document.getElementById('cfg-online-url').value = config.online_api_url || 'https://api.openai.com/v1';
+    document.getElementById('cfg-online-key').value = config.online_api_key || '';
+    document.getElementById('cfg-online-model').value = config.online_model_name || 'gpt-4o-mini';
+    toggleOnlineFields();
   }
 
   // Load memories for active tenant
@@ -311,12 +356,31 @@ async function switchTenant(shortName) {
   }
 }
 
+// --- Toggle online fields ---
+function toggleOnlineFields() {
+  const enabled = document.getElementById('cfg-online-enabled').checked;
+  document.getElementById('online-fields').style.display = enabled ? 'block' : 'none';
+  const label = document.getElementById('online-status-label');
+  if (enabled) {
+    const model = document.getElementById('cfg-online-model').value || 'gpt-4o-mini';
+    label.textContent = `Aktiviert (${model})`;
+    label.className = 'text-sm font-semibold text-emerald-400';
+  } else {
+    label.textContent = 'Deaktiviert (komplett offline)';
+    label.className = 'text-sm font-semibold text-slate-400';
+  }
+}
+
 // --- Save Config ---
 async function saveConfig() {
   const data = {
     strategy_model: document.getElementById('cfg-strategy-model').value,
     num_batch: parseInt(document.getElementById('cfg-num-batch').value) || 1024,
     num_ctx_max: parseInt(document.getElementById('cfg-num-ctx-max').value) || 131072,
+    online_model_enabled: document.getElementById('cfg-online-enabled').checked,
+    online_api_url: document.getElementById('cfg-online-url').value || 'https://api.openai.com/v1',
+    online_api_key: document.getElementById('cfg-online-key').value,
+    online_model_name: document.getElementById('cfg-online-model').value || 'gpt-4o-mini',
   };
   const r = await api('/admin/api/config', {
     method: 'POST',
@@ -326,7 +390,12 @@ async function saveConfig() {
   if (r?.status === 'ok') {
     toast('💾 Konfiguration gespeichert');
     const info = document.getElementById('cfg-strategy-info');
-    info.textContent = data.strategy_model ? `Aktuell: ${data.strategy_model}` : 'Kein Hilfsmodell (Hauptmodell für alles)';
+    if (data.online_model_enabled) {
+      info.textContent = `☁️ Online: ${data.online_model_name}`;
+    } else {
+      info.textContent = data.strategy_model ? `Aktuell: ${data.strategy_model}` : 'Kein Hilfsmodell (Hauptmodell für alles)';
+    }
+    toggleOnlineFields();
   } else {
     toast('Fehler beim Speichern', false);
   }
