@@ -111,6 +111,21 @@
   <!-- Config Tab -->
   <div id="tab-config" class="tab-content">
     <div class="grid md:grid-cols-2 gap-6">
+      <!-- Agent Mode Toggle -->
+      <div class="card md:col-span-2">
+        <div class="section-title">🤖 Agent-Modus</div>
+        <div class="flex items-center gap-4">
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" id="cfg-agent-enabled" class="sr-only peer" onchange="saveConfig()">
+            <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+          </label>
+          <div>
+            <span class="text-sm font-semibold" id="agent-status-label">Agent aktiv</span>
+            <p class="text-xs text-slate-400 mt-0.5" id="agent-status-desc">ReAct-Agent mit Tool-Calling (Suche, Dokumente lesen, Python, Web)</p>
+          </div>
+        </div>
+      </div>
+
       <!-- Tenant Selection -->
       <div class="card">
         <div class="section-title">🏢 Aktiver Mandant</div>
@@ -348,6 +363,9 @@ async function loadDashboard() {
 
   // Performance fields
   if (config) {
+    // Agent mode
+    document.getElementById('cfg-agent-enabled').checked = config.agent_mode_enabled !== false;
+    updateAgentLabel();
     document.getElementById('cfg-num-batch').value = config.num_batch || 1024;
     document.getElementById('cfg-num-ctx-max').value = config.num_ctx_max || 131072;
     // Online model fields
@@ -375,6 +393,22 @@ async function switchTenant(shortName) {
     loadDashboard();
   } else {
     toast('Fehler beim Wechseln', false);
+  }
+}
+
+// --- Update Agent Mode label ---
+function updateAgentLabel() {
+  const enabled = document.getElementById('cfg-agent-enabled').checked;
+  const label = document.getElementById('agent-status-label');
+  const desc = document.getElementById('agent-status-desc');
+  if (enabled) {
+    label.textContent = 'Agent aktiv';
+    label.className = 'text-sm font-semibold text-emerald-400';
+    desc.textContent = 'ReAct-Agent mit Tool-Calling (Suche, Dokumente lesen, Python, Web)';
+  } else {
+    label.textContent = 'Agent aus – Direktmodus';
+    label.className = 'text-sm font-semibold text-amber-400';
+    desc.textContent = 'Nacktes Modell ohne Tools. Nur Frage → Antwort.';
   }
 }
 
@@ -406,6 +440,7 @@ function toggleOnlineFields() {
 // --- Save Config ---
 async function saveConfig() {
   const data = {
+    agent_mode_enabled: document.getElementById('cfg-agent-enabled').checked,
     strategy_model: document.getElementById('cfg-strategy-model').value,
     num_batch: parseInt(document.getElementById('cfg-num-batch').value) || 1024,
     num_ctx_max: parseInt(document.getElementById('cfg-num-ctx-max').value) || 131072,

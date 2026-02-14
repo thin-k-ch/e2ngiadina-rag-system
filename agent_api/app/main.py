@@ -435,6 +435,29 @@ async def ollama_chat(request: Request, x_tenant_id: str | None = Header(default
             yield json.dumps({"model": model_name, "message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}) + "\n"
         return StreamingResponse(stream_tenant_resp(), media_type="application/x-ndjson")
     
+    # Check agent mode
+    from .runtime_config import get_runtime_config
+    agent_enabled = get_runtime_config().get("agent_mode_enabled", True)
+    
+    if not agent_enabled:
+        # Direct mode: pass through to Ollama without ReAct agent
+        print(f"🔧 Direktmodus (Agent aus): model={selected_model}")
+        import httpx
+        async def stream_direct():
+            payload = {"model": selected_model, "messages": messages, "stream": True}
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+                async with client.stream("POST", f"{ollama_base}/api/chat", json=payload) as r:
+                    async for line in r.aiter_lines():
+                        if line:
+                            yield line + "\n"
+        if stream:
+            return StreamingResponse(stream_direct(), media_type="application/x-ndjson")
+        else:
+            import httpx as httpx2
+            async with httpx2.AsyncClient(timeout=httpx2.Timeout(300.0)) as client:
+                r = await client.post(f"{ollama_base}/api/chat", json={"model": selected_model, "messages": messages, "stream": False})
+                return r.json()
+    
     # Route through ReAct Agent
     tenant = tenant_mgr.get_for_request(x_tenant_id)
     print(f"🤖 Ollama /api/chat → ReAct: model={selected_model}, tenant={tenant.short_name}")

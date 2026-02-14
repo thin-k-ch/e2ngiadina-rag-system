@@ -434,9 +434,6 @@ async def _extract_via_pdfplumber(real_path: str, search_terms: list[str]) -> st
     else:
         data_path = "/data/" + real_path
     
-    # Build search terms for page filtering
-    terms_str = ", ".join(f'"{t}"' for t in search_terms[:5])
-    
     # Use word stems (first 5+ chars) for fuzzy matching (handles singular/plural)
     stems = list(set(t.lower()[:min(len(t), 6)] for t in search_terms[:8] if len(t) >= 4))
     stems_py = ", ".join(f'"{s}"' for s in stems)
@@ -471,7 +468,6 @@ else:
 pdf.close()
 '''
     
-    print(f"📄 pdfplumber: data_path={data_path[-80:]}")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(runner_url, json={"code": code}, timeout=aiohttp.ClientTimeout(total=30)) as resp:
@@ -1000,7 +996,6 @@ WICHTIG für answer_hint:
             pdf_src = next((s for s in all_sources if s.get("path", "").lower().endswith(".pdf")), None)
             if pdf_src:
                 top_path = pdf_src.get("path", "")
-                print(f"🔬 Precision mode: extracting from {top_path[-60:]}")
             if pdf_src:
                 import re
                 search_terms = [w for w in re.findall(r'\w+', query) if len(w) >= 4]

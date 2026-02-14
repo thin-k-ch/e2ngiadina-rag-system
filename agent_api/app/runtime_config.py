@@ -22,6 +22,7 @@ class RuntimeConfig:
         "online_api_key": "",
         "online_model_name": "gpt-4o-mini",  # Fast + cheap for routing
         "online_strategy_mode": "routing",  # "routing" = simple tool choice, "planner" = full search plan
+        "agent_mode_enabled": True,  # True = ReAct Agent, False = direct LLM (no tools)
     }
 
     def __init__(self, path: str = None):
