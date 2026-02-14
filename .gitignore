@@ -110,6 +110,7 @@ cookies.txt
 package*.json
 package-lock.json
 *.html
+!agent_api/app/admin.html
 *.js
 *.swp
 

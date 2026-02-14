@@ -6,7 +6,7 @@ import json
 import asyncio
 import traceback
 from fastapi import FastAPI, Header, Request, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse, HTMLResponse
 from typing import Any
 from pydantic import BaseModel
 
@@ -574,6 +574,101 @@ async def switch_tenant(short_name: str):
         return {"status": "ok", "active": t.short_name, "name": t.name}
     available = [t["short_name"] for t in tenant_mgr.list_tenants()]
     raise HTTPException(404, f"Mandant '{short_name}' nicht gefunden. Verfügbar: {available}")
+
+# --- Admin API endpoints ---
+
+@app.get("/admin/api/config")
+async def get_config():
+    """Get runtime configuration"""
+    from .runtime_config import get_runtime_config
+    return get_runtime_config().get_all()
+
+@app.post("/admin/api/config")
+async def set_config(request: Request):
+    """Update runtime configuration"""
+    from .runtime_config import get_runtime_config
+    data = await request.json()
+    get_runtime_config().update(data)
+    return {"status": "ok", "config": get_runtime_config().get_all()}
+
+@app.get("/admin/api/models")
+async def list_models():
+    """List available Ollama models"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{ollama_base}/api/tags")
+            models = r.json().get("models", [])
+            return {"models": [{"name": m["name"], "size_mb": m.get("size", 0) // 1024 // 1024} for m in models]}
+    except Exception as e:
+        return {"models": [], "error": str(e)}
+
+@app.get("/admin/api/status")
+async def system_status():
+    """Get system status: loaded models, ES indices, memory stats"""
+    import httpx
+    status = {"ollama": {}, "elasticsearch": {}, "tenants": tenant_mgr.list_tenants()}
+    
+    # Ollama running models
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{ollama_base}/api/ps")
+            ps = r.json().get("models", [])
+            status["ollama"]["running"] = [
+                {"name": m["name"], "size_mb": m.get("size", 0) // 1024 // 1024,
+                 "vram_mb": m.get("size_vram", 0) // 1024 // 1024}
+                for m in ps
+            ]
+    except Exception:
+        status["ollama"]["running"] = []
+    
+    # ES indices
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{os.getenv('ES_HOST', 'http://elasticsearch:9200')}/_cat/indices?format=json")
+            indices = r.json()
+            status["elasticsearch"]["indices"] = [
+                {"index": idx["index"], "docs": idx.get("docs.count", "0"), "size": idx.get("store.size", "?")}
+                for idx in indices if not idx["index"].startswith(".")
+            ]
+    except Exception:
+        status["elasticsearch"]["indices"] = []
+    
+    # Memory stats per tenant
+    from .memory_store import get_memory_store
+    store = get_memory_store()
+    mem_stats = {}
+    for t in tenant_mgr.list_tenants():
+        memories = store.list_all(t["short_name"])
+        mem_stats[t["short_name"]] = len(memories)
+    status["memories"] = mem_stats
+    
+    return status
+
+@app.get("/admin/api/memories/{tenant_id}")
+async def get_memories(tenant_id: str):
+    """Get all memories for a tenant"""
+    from .memory_store import get_memory_store
+    return {"memories": get_memory_store().list_all(tenant_id)}
+
+@app.delete("/admin/api/memories/{tenant_id}/{memory_id}")
+async def delete_memory(tenant_id: str, memory_id: str):
+    """Delete a specific memory"""
+    from .memory_store import get_memory_store
+    if get_memory_store().delete(tenant_id, memory_id):
+        return {"status": "ok"}
+    raise HTTPException(404, "Memory not found")
+
+# --- Admin HTML page ---
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page():
+    """Serve the admin dashboard"""
+    admin_html_path = os.path.join(os.path.dirname(__file__), "admin.html")
+    if os.path.exists(admin_html_path):
+        with open(admin_html_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return "<h1>Admin page not found</h1>"
 
 async def chat_non_stream_impl(req: ChatReq, x_conversation_id: str | None = None):
     if not req.messages:

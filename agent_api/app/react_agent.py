@@ -649,14 +649,27 @@ class ReactAgent:
     """
     
     def __init__(self, model: str = None, ollama_base: str = None, tenant=None):
-        self.model = model or os.getenv("OLLAMA_MODEL_ANSWER", "llama4:latest")
+        self.model_answer = model or os.getenv("OLLAMA_MODEL_ANSWER", "llama4:latest")
+        # Strategy model: runtime config > env var > same as answer model
+        from .runtime_config import get_runtime_config
+        strategy = get_runtime_config().get("strategy_model", "")
+        if not strategy:
+            strategy = os.getenv("OLLAMA_MODEL_STRATEGY", "")
+        self.model_strategy = strategy if strategy else self.model_answer
+        self.num_batch = get_runtime_config().get("num_batch", 1024)
+        self.num_ctx_max = get_runtime_config().get("num_ctx_max", 131072)
+        # Expose .model for backward compat (used in _stream_with_thinking etc.)
+        self.model = self.model_answer
         self.ollama_base = (ollama_base or os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")).rstrip("/")
         self.max_steps = 6
         self.tenant = tenant  # TenantConfig or None
         # Check module-level cache + known prefixes for prompt-based tool calling
-        self._use_prompt_tools = _needs_prompt_tools(self.model)
-        if self._use_prompt_tools:
-            print(f"🧠 Model {self.model}: using prompt-based tool calling (no native tools)")
+        self._use_prompt_tools_answer = _needs_prompt_tools(self.model_answer)
+        self._use_prompt_tools_strategy = _needs_prompt_tools(self.model_strategy)
+        if self.model_strategy != self.model_answer:
+            print(f"🧠 Model split: strategy={self.model_strategy}, answer={self.model_answer}")
+        if self._use_prompt_tools_answer:
+            print(f"🧠 Model {self.model_answer}: using prompt-based tool calling (no native tools)")
     
     async def run(
         self,
@@ -720,7 +733,7 @@ class ReactAgent:
         
         # --- Shortcut for prompt-tool models on simple queries ---
         fs_code = self._auto_filesystem_code(query)
-        if self._use_prompt_tools and not fs_code and not self._needs_search(query):
+        if self._use_prompt_tools_strategy and not fs_code and not self._needs_search(query):
             print(f"⚡ Prompt-tool model shortcut: simple query, skipping tool-calling")
             async for evt in self._stream_with_thinking(messages):
                 yield evt
@@ -946,27 +959,34 @@ class ReactAgent:
         return tool_calls
     
     async def _llm_with_tools(self, messages: list) -> dict:
-        """Non-streaming LLM call with tool definitions. Retries once on timeout/connection error.
+        """Non-streaming LLM call with tool definitions. Uses strategy model for fast routing.
+        Retries once on timeout/connection error.
         Falls back to prompt-based tool calling if model returns 400 (no native tool support)."""
         import httpx
+        
+        # Use strategy model for tool-calling (faster routing decisions)
+        model = self.model_strategy
+        use_prompt = self._use_prompt_tools_strategy
         
         # Estimate tokens for dynamic context window
         total_chars = sum(len(m.get("content", "")) for m in messages)
         est_tokens = total_chars // 3
-        num_ctx = max(4096, est_tokens + 8192 + 512)
-        num_ctx = min(num_ctx, 131072)
+        num_ctx = max(4096, est_tokens + 4096 + 512)
+        num_ctx = min(num_ctx, min(65536, self.num_ctx_max))
         
         # For prompt-based tool calling, inject tool instructions into messages
-        if self._use_prompt_tools:
+        if use_prompt:
             return await self._llm_with_prompt_tools(messages, num_ctx, total_chars)
         
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": messages,
             "tools": TOOLS,
             "stream": False,
             "options": {
                 "num_ctx": num_ctx,
+                "num_batch": self.num_batch,
+                "num_predict": 2048,
                 "temperature": 0.2,
             }
         }
@@ -975,7 +995,7 @@ class ReactAgent:
         if total_chars > 20000:
             timeout = 300.0
         
-        print(f"🔧 ReAct LLM: {total_chars} chars, num_ctx={num_ctx}, model={self.model}")
+        print(f"🔧 ReAct LLM (strategy): {total_chars} chars, num_ctx={num_ctx}, model={model}")
         
         last_err = None
         for attempt in range(2):
@@ -987,9 +1007,9 @@ class ReactAgent:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 400:
                     # Model doesn't support native tool-calling → switch to prompt-based
-                    print(f"⚠️ Model {self.model} returned 400 with tools → switching to prompt-based tool calling")
-                    self._use_prompt_tools = True
-                    _mark_prompt_tools(self.model)  # Cache for future requests
+                    print(f"⚠️ Model {model} returned 400 with tools → switching to prompt-based tool calling")
+                    self._use_prompt_tools_strategy = True
+                    _mark_prompt_tools(model)  # Cache for future requests
                     return await self._llm_with_prompt_tools(messages, num_ctx, total_chars)
                 raise LLMError(f"HTTP {e.response.status_code}: {e}")
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadError) as e:
@@ -1034,19 +1054,24 @@ class ReactAgent:
         
         augmented_messages = self._augment_messages_for_prompt_tools(messages)
         
+        # Use strategy model for prompt-based tool calling too
+        model = self.model_strategy
+        
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": augmented_messages,
             "stream": True,
             "options": {
                 "num_ctx": num_ctx,
+                "num_batch": self.num_batch,
+                "num_predict": 2048,
                 "temperature": 0.2,
             }
         }
         
         timeout = 600.0  # Long timeout for reasoning models
         
-        print(f"🔧 ReAct LLM (prompt-tools/stream): {total_chars} chars, num_ctx={num_ctx}, model={self.model}")
+        print(f"🔧 ReAct LLM (prompt-tools/stream): {total_chars} chars, num_ctx={num_ctx}, model={model}")
         
         # Stream and collect full response
         full_content = []
@@ -1091,7 +1116,7 @@ class ReactAgent:
         total_chars = sum(len(m.get("content", "")) for m in messages)
         est_tokens = total_chars // 3
         num_ctx = max(4096, est_tokens + 8192 + 512)
-        num_ctx = min(num_ctx, 131072)
+        num_ctx = min(num_ctx, self.num_ctx_max)
         
         # Remove tool_calls from messages for clean streaming
         # For prompt-based models: convert tool/tool_calls messages to plain text
@@ -1112,12 +1137,16 @@ class ReactAgent:
             else:
                 clean_messages.append({"role": role, "content": content})
         
+        # Final answer uses the answer model (big model for quality)
+        answer_model = self.model_answer
+        
         payload = {
-            "model": self.model,
+            "model": answer_model,
             "messages": clean_messages,
             "stream": True,
             "options": {
                 "num_ctx": num_ctx,
+                "num_batch": self.num_batch,
                 "temperature": 0.3,
                 "num_predict": 8192,
             }
@@ -1127,10 +1156,10 @@ class ReactAgent:
         if total_chars > 20000:
             timeout = 600.0
         # Reasoning models need much longer for first token (internal <think> phase)
-        if self._use_prompt_tools:
+        if self._use_prompt_tools_answer:
             timeout = max(timeout, 600.0)
         
-        print(f"🔧 ReAct stream: {total_chars} chars, num_ctx={num_ctx}, timeout={timeout}s, model={self.model}")
+        print(f"🔧 ReAct stream (answer): {total_chars} chars, num_ctx={num_ctx}, timeout={timeout}s, model={answer_model}")
         
         last_err = None
         for attempt in range(2):

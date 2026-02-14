@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Admin</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 1.5rem; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+  .badge-active { background: #065f46; color: #6ee7b7; }
+  .badge-inactive { background: #1e293b; color: #94a3b8; border: 1px solid #475569; }
+  .btn { padding: 8px 16px; border-radius: 8px; font-weight: 600; font-size: 0.875rem; cursor: pointer; transition: all 0.15s; border: none; }
+  .btn-primary { background: #3b82f6; color: white; }
+  .btn-primary:hover { background: #2563eb; }
+  .btn-danger { background: #991b1b; color: #fca5a5; }
+  .btn-danger:hover { background: #b91c1c; }
+  .btn-ghost { background: transparent; color: #94a3b8; border: 1px solid #475569; }
+  .btn-ghost:hover { background: #334155; color: #e2e8f0; }
+  select, input { background: #0f172a; border: 1px solid #475569; color: #e2e8f0; padding: 8px 12px; border-radius: 8px; font-size: 0.875rem; }
+  select:focus, input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.3); }
+  .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; border-radius: 10px; font-weight: 500; z-index: 100; transition: all 0.3s; opacity: 0; transform: translateY(10px); }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast-ok { background: #065f46; color: #6ee7b7; border: 1px solid #047857; }
+  .toast-err { background: #7f1d1d; color: #fca5a5; border: 1px solid #991b1b; }
+  .mem-item { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: flex-start; }
+  .mem-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+  .mem-tag { background: #1e3a5f; color: #93c5fd; padding: 1px 8px; border-radius: 4px; font-size: 0.7rem; }
+  .stat-value { font-size: 1.75rem; font-weight: 700; color: #f8fafc; }
+  .stat-label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+  .section-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 1rem; display: flex; align-items: center; gap: 8px; }
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #475569; border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: #94a3b8; font-weight: 500; transition: all 0.15s; }
+  .tab:hover { color: #e2e8f0; }
+  .tab.active { color: #3b82f6; border-bottom-color: #3b82f6; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+</style>
+</head>
+<body class="min-h-screen">
+
+<!-- Header -->
+<header class="border-b border-slate-700 px-6 py-4 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <span class="text-2xl">⚙️</span>
+    <h1 class="text-xl font-bold text-white">RAG Admin</h1>
+    <span class="text-sm text-slate-500">e2ngiadina</span>
+  </div>
+  <div class="flex items-center gap-3">
+    <span id="status-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+    <span class="text-sm text-slate-400">System Online</span>
+  </div>
+</header>
+
+<!-- Tabs -->
+<nav class="border-b border-slate-700 px-6 flex gap-1">
+  <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">📊 Dashboard</div>
+  <div class="tab" data-tab="config" onclick="switchTab('config')">🔧 Konfiguration</div>
+  <div class="tab" data-tab="memories" onclick="switchTab('memories')">🧠 Gedächtnis</div>
+</nav>
+
+<!-- Content -->
+<main class="max-w-6xl mx-auto p-6">
+
+  <!-- Dashboard Tab -->
+  <div id="tab-dashboard" class="tab-content active">
+    <!-- Stats Row -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div class="card text-center">
+        <div class="stat-value" id="stat-tenants">-</div>
+        <div class="stat-label">Mandanten</div>
+      </div>
+      <div class="card text-center">
+        <div class="stat-value" id="stat-models">-</div>
+        <div class="stat-label">Modelle geladen</div>
+      </div>
+      <div class="card text-center">
+        <div class="stat-value" id="stat-indices">-</div>
+        <div class="stat-label">ES Indices</div>
+      </div>
+      <div class="card text-center">
+        <div class="stat-value" id="stat-memories">-</div>
+        <div class="stat-label">Notizen gesamt</div>
+      </div>
+    </div>
+
+    <!-- Tenants + Models -->
+    <div class="grid md:grid-cols-2 gap-6 mb-6">
+      <!-- Active Tenant -->
+      <div class="card">
+        <div class="section-title">🏢 Mandanten</div>
+        <div id="tenants-list"></div>
+      </div>
+
+      <!-- Running Models -->
+      <div class="card">
+        <div class="section-title">🤖 Geladene Modelle</div>
+        <div id="models-running"></div>
+      </div>
+    </div>
+
+    <!-- ES Indices -->
+    <div class="card">
+      <div class="section-title">🗄️ Elasticsearch Indices</div>
+      <div id="es-indices"></div>
+    </div>
+  </div>
+
+  <!-- Config Tab -->
+  <div id="tab-config" class="tab-content">
+    <div class="grid md:grid-cols-2 gap-6">
+      <!-- Tenant Selection -->
+      <div class="card">
+        <div class="section-title">🏢 Aktiver Mandant</div>
+        <p class="text-sm text-slate-400 mb-4">Der aktive Mandant bestimmt welche Dokumente und welcher ES-Index für Suchanfragen verwendet wird.</p>
+        <select id="cfg-tenant" class="w-full mb-3" onchange="switchTenant(this.value)">
+        </select>
+        <div id="tenant-details" class="text-sm text-slate-400 mt-2"></div>
+      </div>
+
+      <!-- Strategy Model -->
+      <div class="card">
+        <div class="section-title">🧠 Hilfsmodell (Strategy)</div>
+        <p class="text-sm text-slate-400 mb-4">Kleines Modell für schnelle Tool-Routing-Entscheidungen. Das Hauptmodell (in OpenWebUI gewählt) wird für die finale Antwort verwendet.</p>
+        <select id="cfg-strategy-model" class="w-full mb-3">
+          <option value="">— Kein Split (Hauptmodell für alles) —</option>
+        </select>
+        <button class="btn btn-primary mt-2" onclick="saveConfig()">💾 Speichern</button>
+        <div id="cfg-strategy-info" class="text-sm text-slate-400 mt-2"></div>
+      </div>
+
+      <!-- Performance -->
+      <div class="card">
+        <div class="section-title">⚡ Performance</div>
+        <div class="mb-3">
+          <label class="text-sm text-slate-400 block mb-1">num_batch (Prompt-Verarbeitung)</label>
+          <input type="number" id="cfg-num-batch" class="w-full" min="128" max="4096" step="128">
+        </div>
+        <div class="mb-3">
+          <label class="text-sm text-slate-400 block mb-1">num_ctx_max (Max. Kontextfenster)</label>
+          <input type="number" id="cfg-num-ctx-max" class="w-full" min="4096" max="262144" step="4096">
+        </div>
+        <button class="btn btn-primary mt-2" onclick="saveConfig()">💾 Speichern</button>
+      </div>
+
+      <!-- Info -->
+      <div class="card">
+        <div class="section-title">ℹ️ Hinweise</div>
+        <ul class="text-sm text-slate-400 space-y-2">
+          <li>• <strong>Mandant wechseln</strong>: Auch per Chat möglich: <code class="bg-slate-800 px-1.5 py-0.5 rounded text-blue-300">"Wechsle zu tfk18"</code></li>
+          <li>• <strong>Mandanten auflisten</strong>: <code class="bg-slate-800 px-1.5 py-0.5 rounded text-blue-300">"Welche Mandanten haben wir?"</code></li>
+          <li>• <strong>Hilfsmodell</strong>: Leer = Hauptmodell für alles. Empfehlung: <code class="bg-slate-800 px-1.5 py-0.5 rounded text-blue-300">qwen2.5:3b</code> für schnelle Tool-Entscheidungen.</li>
+          <li>• <strong>num_batch</strong>: Höher = schnellere Prompt-Verarbeitung, mehr VRAM. Standard: 1024.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- Memories Tab -->
+  <div id="tab-memories" class="tab-content">
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <div class="section-title mb-0">🧠 Langzeit-Gedächtnis</div>
+        <select id="mem-tenant-select" class="text-sm" onchange="loadMemories(this.value)">
+        </select>
+      </div>
+      <div id="memories-list">
+        <p class="text-slate-500 text-sm">Mandant wählen...</p>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<script>
+const API = '';
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${tab}`));
+}
+
+function toast(msg, ok = true) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = `toast ${ok ? 'toast-ok' : 'toast-err'} show`;
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+async function api(path, opts = {}) {
+  try {
+    const r = await fetch(API + path, opts);
+    return await r.json();
+  } catch (e) {
+    console.error(`API ${path}:`, e);
+    return null;
+  }
+}
+
+// --- Load Dashboard ---
+async function loadDashboard() {
+  const [status, config, models] = await Promise.all([
+    api('/admin/api/status'),
+    api('/admin/api/config'),
+    api('/admin/api/models'),
+  ]);
+
+  if (!status) return;
+
+  // Stats
+  document.getElementById('stat-tenants').textContent = status.tenants?.length || 0;
+  document.getElementById('stat-models').textContent = status.ollama?.running?.length || 0;
+  document.getElementById('stat-indices').textContent = status.elasticsearch?.indices?.length || 0;
+  const totalMem = Object.values(status.memories || {}).reduce((a, b) => a + b, 0);
+  document.getElementById('stat-memories').textContent = totalMem;
+
+  // Tenants list
+  const tHtml = (status.tenants || []).map(t => `
+    <div class="flex items-center justify-between py-2 ${t.active ? '' : 'opacity-60'}">
+      <div>
+        <span class="font-semibold text-white">${t.short_name}</span>
+        <span class="text-slate-400 text-sm ml-2">${t.name}</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-slate-500">${t.es_index}</span>
+        <span class="badge ${t.active ? 'badge-active' : 'badge-inactive'}">${t.active ? 'aktiv' : 'inaktiv'}</span>
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('tenants-list').innerHTML = tHtml || '<p class="text-slate-500">Keine Mandanten</p>';
+
+  // Running models
+  const mHtml = (status.ollama?.running || []).map(m => `
+    <div class="flex items-center justify-between py-2">
+      <span class="font-semibold text-white">${m.name}</span>
+      <div class="text-sm text-slate-400">
+        <span>${m.size_mb?.toLocaleString()} MB</span>
+        <span class="ml-2 text-emerald-400">${m.vram_mb?.toLocaleString()} MB VRAM</span>
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('models-running').innerHTML = mHtml || '<p class="text-slate-500">Keine Modelle geladen</p>';
+
+  // ES indices
+  const eHtml = (status.elasticsearch?.indices || []).map(idx => `
+    <div class="flex items-center justify-between py-2">
+      <span class="font-mono text-blue-300 text-sm">${idx.index}</span>
+      <div class="text-sm text-slate-400">
+        <span>${Number(idx.docs).toLocaleString()} docs</span>
+        <span class="ml-3">${idx.size}</span>
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('es-indices').innerHTML = eHtml || '<p class="text-slate-500">Keine Indices</p>';
+
+  // Populate config tab selects
+  const tenantSelect = document.getElementById('cfg-tenant');
+  const memTenantSelect = document.getElementById('mem-tenant-select');
+  tenantSelect.innerHTML = (status.tenants || []).map(t =>
+    `<option value="${t.short_name}" ${t.active ? 'selected' : ''}>${t.short_name} — ${t.name}</option>`
+  ).join('');
+  memTenantSelect.innerHTML = (status.tenants || []).map(t =>
+    `<option value="${t.short_name}" ${t.active ? 'selected' : ''}>${t.short_name}</option>`
+  ).join('');
+
+  // Show tenant details
+  const activeTenant = (status.tenants || []).find(t => t.active);
+  if (activeTenant) {
+    document.getElementById('tenant-details').innerHTML =
+      `ES-Index: <code class="text-blue-300">${activeTenant.es_index}</code> | Dokumente: <code class="text-blue-300">${activeTenant.document_root}</code>`;
+  }
+
+  // Strategy model select
+  if (models?.models) {
+    const stratSelect = document.getElementById('cfg-strategy-model');
+    const currentStrategy = config?.strategy_model || '';
+    stratSelect.innerHTML = '<option value="">— Kein Split (Hauptmodell für alles) —</option>' +
+      models.models.map(m =>
+        `<option value="${m.name}" ${m.name === currentStrategy ? 'selected' : ''}>${m.name} (${m.size_mb?.toLocaleString()} MB)</option>`
+      ).join('');
+    if (currentStrategy) {
+      document.getElementById('cfg-strategy-info').textContent = `Aktuell: ${currentStrategy}`;
+    }
+  }
+
+  // Performance fields
+  if (config) {
+    document.getElementById('cfg-num-batch').value = config.num_batch || 1024;
+    document.getElementById('cfg-num-ctx-max').value = config.num_ctx_max || 131072;
+  }
+
+  // Load memories for active tenant
+  if (activeTenant) {
+    loadMemories(activeTenant.short_name);
+  }
+}
+
+// --- Switch Tenant ---
+async function switchTenant(shortName) {
+  const r = await api(`/tenants/switch/${shortName}`, { method: 'POST' });
+  if (r?.status === 'ok') {
+    toast(`🏢 Mandant gewechselt: ${r.active}`);
+    loadDashboard();
+  } else {
+    toast('Fehler beim Wechseln', false);
+  }
+}
+
+// --- Save Config ---
+async function saveConfig() {
+  const data = {
+    strategy_model: document.getElementById('cfg-strategy-model').value,
+    num_batch: parseInt(document.getElementById('cfg-num-batch').value) || 1024,
+    num_ctx_max: parseInt(document.getElementById('cfg-num-ctx-max').value) || 131072,
+  };
+  const r = await api('/admin/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (r?.status === 'ok') {
+    toast('💾 Konfiguration gespeichert');
+    const info = document.getElementById('cfg-strategy-info');
+    info.textContent = data.strategy_model ? `Aktuell: ${data.strategy_model}` : 'Kein Hilfsmodell (Hauptmodell für alles)';
+  } else {
+    toast('Fehler beim Speichern', false);
+  }
+}
+
+// --- Load Memories ---
+async function loadMemories(tenantId) {
+  const container = document.getElementById('memories-list');
+  container.innerHTML = '<div class="spinner"></div>';
+  const r = await api(`/admin/api/memories/${tenantId}`);
+  if (!r?.memories?.length) {
+    container.innerHTML = '<p class="text-slate-500 text-sm">Keine Notizen für diesen Mandanten.</p>';
+    return;
+  }
+  container.innerHTML = r.memories.map(m => {
+    const date = m.created_at ? new Date(m.created_at * 1000).toLocaleString('de-CH') : '?';
+    const tags = (m.tags || []).map(t => `<span class="mem-tag">${t}</span>`).join('');
+    return `
+      <div class="mem-item">
+        <div class="flex-1">
+          <div class="text-sm text-white">${escHtml(m.content)}</div>
+          <div class="flex items-center gap-3 mt-1">
+            <span class="text-xs text-slate-500">${date}</span>
+            <span class="text-xs text-slate-600 font-mono">${m.id}</span>
+            ${tags ? `<div class="mem-tags">${tags}</div>` : ''}
+          </div>
+        </div>
+        <button class="btn btn-danger text-xs ml-3" onclick="deleteMemory('${tenantId}','${m.id}')">🗑️</button>
+      </div>
+    `;
+  }).join('');
+}
+
+async function deleteMemory(tenantId, memoryId) {
+  if (!confirm('Notiz wirklich löschen?')) return;
+  const r = await api(`/admin/api/memories/${tenantId}/${memoryId}`, { method: 'DELETE' });
+  if (r?.status === 'ok') {
+    toast('🗑️ Notiz gelöscht');
+    loadMemories(tenantId);
+    loadDashboard();
+  } else {
+    toast('Fehler beim Löschen', false);
+  }
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// Init
+loadDashboard();
+// Auto-refresh every 30s
+setInterval(loadDashboard, 30000);
+</script>
+</body>
+</html>
