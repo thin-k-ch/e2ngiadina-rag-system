@@ -700,7 +700,9 @@ Analysiere die Benutzer-Frage und erstelle einen strukturierten Suchplan als JSO
 
 Regeln:
 - Generiere 1-3 gezielte Suchanfragen (deutsch, mit Synonymen/Fachbegriffen)
-- Entscheide ob Dokumente gelesen werden sollen (read_top_n: 0-3)
+- Entscheide ob Dokumente gelesen werden sollen (read_top_n: 0-5)
+- Wenn der User WORTGENAUE Zitate oder spezifische Kapitel verlangt: read_top_n=3-5 (mehr lesen!)
+- Wenn der User auf "Quelle X" verweist: read_top_n mindestens so hoch wie X
 - Gib Fokus-Hinweise für die finale Antwort
 - Bei einfachen Fragen: weniger Schritte. Bei komplexen: mehr.
 - Bei Grüssen/Small-Talk: setze "skip": true
@@ -718,7 +720,7 @@ Antworte NUR mit validem JSON, kein anderer Text:
         messages = [{"role": "system", "content": planner_prompt}]
         if chat_history:
             for m in chat_history[-4:]:
-                messages.append({"role": m["role"], "content": m.get("content", "")[:500]})
+                messages.append({"role": m["role"], "content": m.get("content", "")[:1500]})
         messages.append({"role": "user", "content": query})
         
         total_chars = sum(len(m.get("content", "")) for m in messages)
@@ -797,7 +799,7 @@ Antworte NUR mit validem JSON, kein anderer Text:
         
         # Step 1: Run all search queries
         queries = plan.get("queries", [query])
-        for sq in queries[:3]:
+        for sq in queries[:3]:  # max 3 search queries
             steps += 1
             yield {"type": "phase", "content": f"🔍 Suche: *{sq[:60]}*...\n\n"}
             yield {"type": "tool_call", "name": "search_documents", "args": {"query": sq}}
@@ -810,7 +812,7 @@ Antworte NUR mit validem JSON, kein anderer Text:
             yield {"type": "tool_result", "name": "search_documents", "summary": summary}
         
         # Step 2: Read top documents if requested
-        read_n = plan.get("read_top_n", 0)
+        read_n = min(plan.get("read_top_n", 0), 5)
         if read_n > 0 and all_sources:
             for src in all_sources[:read_n]:
                 steps += 1
@@ -839,7 +841,13 @@ Antworte NUR mit validem JSON, kein anderer Text:
         if len(context_text) > 30000:
             context_text = context_text[:30000] + "\n\n[... gekürzt]"
         
-        answer_instruction = f"""Beantworte die Frage basierend auf den folgenden Suchergebnissen und Dokumenten.
+        answer_instruction = f"""Du bist ein Dokumenten-Analyst. Dir wurden Suchergebnisse und Dokument-Inhalte bereitgestellt.
+
+WICHTIG:
+- Du HAST Zugriff auf die Dokumente – der Inhalt steht im KONTEXT unten.
+- Zitiere WORTGENAU aus dem Kontext wenn der User das verlangt.
+- Sage NIEMALS "ich habe keinen Zugriff" oder "nicht verfügbar" – die Daten sind da.
+- Wenn eine Information nicht im Kontext steht, sage "Im bereitgestellten Kontext nicht enthalten."
 {"Fokus: " + focus if focus else ""}
 {"Format: " + answer_format if answer_format else ""}
 {"Hinweis: " + answer_hint if answer_hint else ""}
