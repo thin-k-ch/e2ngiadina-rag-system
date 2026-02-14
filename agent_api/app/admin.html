@@ -137,7 +137,7 @@
         <p class="text-sm text-slate-400 mb-4">Nutzt eine Cloud-API für schnelle Tool-Routing-Entscheidungen. <strong class="text-amber-400">Keine Dokument-Inhalte werden gesendet</strong> – nur die User-Frage und Tool-Definitionen.</p>
         <div class="flex items-center gap-3 mb-4">
           <label class="relative inline-flex items-center cursor-pointer">
-            <input type="checkbox" id="cfg-online-enabled" class="sr-only peer" onchange="toggleOnlineFields()">
+            <input type="checkbox" id="cfg-online-enabled" class="sr-only peer" onchange="toggleOnlineFields(); saveConfig()">
             <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
           </label>
           <span class="text-sm font-semibold" id="online-status-label">Deaktiviert (komplett offline)</span>
@@ -163,7 +163,6 @@
               </div>
             </label>
           </div>
-          <button class="btn btn-primary mt-3" onclick="saveConfig()">💾 Modus speichern</button>
         </div>
         <!-- API details: collapsible -->
         <details id="online-details" class="mb-3">
@@ -184,9 +183,9 @@
             <div class="p-3 rounded-lg bg-slate-800 border border-slate-600 text-xs text-slate-400">
               <strong class="text-amber-400">🔒 Privacy:</strong> Keine Dokument-Inhalte, Suchergebnisse oder Gedächtnis gehen an die Cloud.
             </div>
-            <button class="btn btn-primary" onclick="saveConfig()">💾 Speichern</button>
           </div>
         </details>
+        <button class="btn btn-primary mt-3" onclick="saveConfig()">💾 Speichern</button>
       </div>
 
       <!-- Performance -->
