@@ -563,6 +563,140 @@ async def ollama_chat(request: Request, x_tenant_id: str | None = Header(default
                 full_text += event.get("content", "")
         return {"model": model_name, "message": {"role": "assistant", "content": full_text}, "done": True}
 
+async def _convert_office_to_pdf(src_path: str) -> str | None:
+    """Convert Office document to PDF via LibreOffice headless. Returns path to PDF or None."""
+    import subprocess, tempfile, shutil
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="lo_convert_")
+        result = subprocess.run(
+            ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", tmpdir, src_path],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            print(f"⚠️ LibreOffice conversion failed: {result.stderr[:200]}")
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return None
+        basename = os.path.basename(src_path).rsplit(".", 1)[0] + ".pdf"
+        pdf_path = os.path.join(tmpdir, basename)
+        if os.path.exists(pdf_path):
+            print(f"📄 LibreOffice: converted {src_path[-60:]} → PDF ({os.path.getsize(pdf_path)} bytes)")
+            return pdf_path
+        # LibreOffice may produce a slightly different filename
+        for f in os.listdir(tmpdir):
+            if f.endswith(".pdf"):
+                return os.path.join(tmpdir, f)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return None
+    except Exception as e:
+        print(f"⚠️ LibreOffice error: {e}")
+        return None
+
+
+def _render_eml_as_html(eml_path: str) -> str | None:
+    """Parse .eml file and render as styled HTML for browser display."""
+    import email
+    from email import policy
+    from html import escape
+    try:
+        with open(eml_path, "rb") as f:
+            msg = email.message_from_binary_file(f, policy=policy.default)
+        
+        subject = msg.get("Subject", "(kein Betreff)")
+        from_addr = msg.get("From", "")
+        to_addr = msg.get("To", "")
+        cc_addr = msg.get("Cc", "")
+        date = msg.get("Date", "")
+        
+        # Extract body
+        body_html = ""
+        body_text = ""
+        for part in msg.walk():
+            ct = part.get_content_type()
+            if ct == "text/html" and not body_html:
+                body_html = part.get_content()
+            elif ct == "text/plain" and not body_text:
+                body_text = part.get_content()
+        
+        # Collect attachments
+        attachments = []
+        for part in msg.iter_attachments():
+            fname = part.get_filename() or "(unnamed)"
+            size = len(part.get_content() if isinstance(part.get_content(), bytes) else str(part.get_content()).encode())
+            attachments.append(f"{escape(fname)} ({size:,} bytes)")
+        
+        content = body_html if body_html else f"<pre>{escape(body_text)}</pre>"
+        att_html = ""
+        if attachments:
+            att_html = "<div style='margin-top:12px;padding:8px;background:#f5f5f5;border-radius:4px'><strong>📎 Anhänge:</strong><br>" + "<br>".join(attachments) + "</div>"
+        
+        return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>{escape(subject)}</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:900px;margin:20px auto;padding:20px}}
+.header{{background:#f8f9fa;border:1px solid #dee2e6;border-radius:8px;padding:16px;margin-bottom:20px}}
+.field{{margin:4px 0}}.label{{font-weight:600;color:#495057;min-width:50px;display:inline-block}}
+.content{{border:1px solid #e9ecef;border-radius:8px;padding:16px;background:#fff}}</style></head>
+<body><div class="header">
+<div class="field"><span class="label">Betreff:</span> <strong>{escape(subject)}</strong></div>
+<div class="field"><span class="label">Von:</span> {escape(from_addr)}</div>
+<div class="field"><span class="label">An:</span> {escape(to_addr)}</div>
+{"<div class='field'><span class='label'>Cc:</span> " + escape(cc_addr) + "</div>" if cc_addr else ""}
+<div class="field"><span class="label">Datum:</span> {escape(date)}</div>
+{att_html}</div>
+<div class="content">{content}</div></body></html>"""
+    except Exception as e:
+        print(f"⚠️ EML parse error: {e}")
+        return None
+
+
+def _render_msg_as_html(msg_path: str) -> str | None:
+    """Parse Outlook .msg file and render as styled HTML for browser display."""
+    from html import escape
+    try:
+        import extract_msg
+        msg = extract_msg.Message(msg_path)
+        
+        subject = msg.subject or "(kein Betreff)"
+        from_addr = msg.sender or ""
+        to_addr = msg.to or ""
+        cc_addr = msg.cc or ""
+        date = msg.date or ""
+        body = msg.body or ""
+        html_body = msg.htmlBody
+        
+        attachments = []
+        for att in msg.attachments:
+            name = att.longFilename or att.shortFilename or "(unnamed)"
+            size = len(att.data) if att.data else 0
+            attachments.append(f"{escape(name)} ({size:,} bytes)")
+        
+        msg.close()
+        
+        if html_body:
+            content = html_body if isinstance(html_body, str) else html_body.decode("utf-8", errors="replace")
+        else:
+            content = f"<pre>{escape(body)}</pre>"
+        
+        att_html = ""
+        if attachments:
+            att_html = "<div style='margin-top:12px;padding:8px;background:#f5f5f5;border-radius:4px'><strong>📎 Anhänge:</strong><br>" + "<br>".join(attachments) + "</div>"
+        
+        return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>{escape(subject)}</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:900px;margin:20px auto;padding:20px}}
+.header{{background:#f8f9fa;border:1px solid #dee2e6;border-radius:8px;padding:16px;margin-bottom:20px}}
+.field{{margin:4px 0}}.label{{font-weight:600;color:#495057;min-width:50px;display:inline-block}}
+.content{{border:1px solid #e9ecef;border-radius:8px;padding:16px;background:#fff}}</style></head>
+<body><div class="header">
+<div class="field"><span class="label">Betreff:</span> <strong>{escape(subject)}</strong></div>
+<div class="field"><span class="label">Von:</span> {escape(from_addr)}</div>
+<div class="field"><span class="label">An:</span> {escape(to_addr)}</div>
+{"<div class='field'><span class='label'>Cc:</span> " + escape(cc_addr) + "</div>" if cc_addr else ""}
+<div class="field"><span class="label">Datum:</span> {escape(str(date))}</div>
+{att_html}</div>
+<div class="content">{content}</div></body></html>"""
+    except Exception as e:
+        print(f"⚠️ MSG parse error: {e}")
+        return None
+
+
 @app.get("/open")
 async def open_file(path: str):
     # Allow access to any tenant's document_root
@@ -582,6 +716,31 @@ async def open_file(path: str):
     if not os.path.isfile(normalized_path):
         return {"error": "Path is not a file"}
 
+    ext = os.path.splitext(normalized_path)[1].lower()
+    
+    # Office formats → convert to PDF via LibreOffice
+    if ext in (".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".odt", ".ods", ".odp"):
+        pdf_path = await _convert_office_to_pdf(normalized_path)
+        if pdf_path:
+            return FileResponse(pdf_path, media_type="application/pdf",
+                                filename=os.path.basename(normalized_path).rsplit(".", 1)[0] + ".pdf")
+        # Fallback: download original
+        return FileResponse(normalized_path)
+    
+    # EML → render as HTML
+    if ext == ".eml":
+        html = _render_eml_as_html(normalized_path)
+        if html:
+            return HTMLResponse(content=html)
+        return FileResponse(normalized_path)
+    
+    # MSG (Outlook) → render as HTML
+    if ext == ".msg":
+        html = _render_msg_as_html(normalized_path)
+        if html:
+            return HTMLResponse(content=html)
+        return FileResponse(normalized_path)
+    
     return FileResponse(normalized_path)
 
 @app.get("/tenants")

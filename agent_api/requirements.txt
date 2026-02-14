@@ -10,3 +10,4 @@ numpy==1.26.4
 elasticsearch==8.12.1
 pyyaml==6.0.1
 aiohttp==3.9.5
+extract-msg==0.48.7
