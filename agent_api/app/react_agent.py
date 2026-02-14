@@ -794,7 +794,9 @@ Antworte NUR mit validem JSON, kein anderer Text:
         
         # --- Execute plan mechanically ---
         all_sources = []
-        all_context = []
+        search_context = []
+        read_context = []
+        read_sources = []  # Only docs that were actually read
         steps = 0
         
         # Step 1: Run all search queries
@@ -805,7 +807,7 @@ Antworte NUR mit validem JSON, kein anderer Text:
             yield {"type": "tool_call", "name": "search_documents", "args": {"query": sq}}
             
             result = await _execute_search({"query": sq}, tenant=self.tenant)
-            all_context.append(f"--- Suche '{sq}' ---\n{result}")
+            search_context.append(f"--- Suche '{sq}' ---\n{result}")
             all_sources.extend(self._extract_sources(result))
             
             summary = f"{len(result)} Zeichen"
@@ -823,7 +825,8 @@ Antworte NUR mit validem JSON, kein anderer Text:
                 yield {"type": "tool_call", "name": "read_document", "args": {"path": path}}
                 
                 doc_content = await _execute_read_document({"path": path}, tenant=self.tenant)
-                all_context.append(f"--- Dokument: {path} ---\n{doc_content}")
+                read_context.append(f"--- Dokument: {path} ---\n{doc_content}")
+                read_sources.append(src)
                 
                 summary = f"{len(doc_content)} Zeichen"
                 yield {"type": "tool_result", "name": "read_document", "summary": summary}
@@ -832,23 +835,30 @@ Antworte NUR mit validem JSON, kein anderer Text:
         yield {"type": "thinking_end", "steps": steps, "elapsed": elapsed}
         
         # Step 3: Generate final answer – use same format as ReAct loop
-        # Build messages like the ReAct loop would: system prompt + tool calls + results + user query
         focus = plan.get("focus", "")
         answer_format = plan.get("answer_format", "")
         answer_hint = plan.get("answer_hint", "")
         
         messages = self._build_system_messages(query, chat_history, system_prompt_extra)
+        user_msg = messages.pop()  # Remove user query (re-add at end)
         
-        # Insert tool results BEFORE the final user message (like ReAct does)
-        user_msg = messages.pop()  # Remove the user query (will re-add at end)
+        # If documents were read, prioritize their FULL content over search snippets
+        if read_context:
+            # Only include search snippets as brief overview, then full docs
+            messages.append({"role": "assistant", "content": "Ich habe relevante Dokumente gefunden und vollständig gelesen."})
+            messages.append({"role": "tool", "content": search_context[0][:3000] if search_context else ""})
+            for ctx in read_context:
+                truncated = ctx[:20000] if len(ctx) > 20000 else ctx
+                messages.append({"role": "assistant", "content": "Vollständiger Dokument-Inhalt:"})
+                messages.append({"role": "tool", "content": truncated})
+        else:
+            # No docs read – use search snippets only
+            for ctx in search_context:
+                truncated = ctx[:12000] if len(ctx) > 12000 else ctx
+                messages.append({"role": "assistant", "content": "Ich habe folgende Informationen gefunden:"})
+                messages.append({"role": "tool", "content": truncated})
         
-        for ctx in all_context:
-            # Truncate individual tool results if too long
-            truncated = ctx[:12000] if len(ctx) > 12000 else ctx
-            messages.append({"role": "assistant", "content": f"Ich habe folgende Informationen gefunden:"})
-            messages.append({"role": "tool", "content": truncated})
-        
-        # Add focus/format hints as a brief assistant note if present
+        # Add focus/format hints
         hints = []
         if focus: hints.append(f"Fokus: {focus}")
         if answer_format: hints.append(f"Format: {answer_format}")
@@ -856,24 +866,25 @@ Antworte NUR mit validem JSON, kein anderer Text:
         if hints:
             messages.append({"role": "assistant", "content": " | ".join(hints)})
         
-        # Re-add user query
         messages.append(user_msg)
         
-        # Stream final answer from local model (same method as ReAct)
+        # Stream final answer from local model
         async for evt in self._stream_with_thinking(messages):
             yield evt
         
-        # Emit sources
-        # Dedup sources
-        seen = set()
-        unique_sources = []
-        for s in all_sources:
-            fn = s.get("display_name", s.get("path", ""))
-            if fn not in seen:
-                seen.add(fn)
-                unique_sources.append(s)
-        if unique_sources:
-            yield {"type": "sources", "sources": unique_sources[:10]}
+        # Emit sources: only READ docs if available, otherwise search sources
+        if read_sources:
+            yield {"type": "sources", "sources": read_sources}
+        else:
+            seen = set()
+            unique_sources = []
+            for s in all_sources:
+                fn = s.get("display_name", s.get("path", ""))
+                if fn not in seen:
+                    seen.add(fn)
+                    unique_sources.append(s)
+            if unique_sources:
+                yield {"type": "sources", "sources": unique_sources[:5]}
         
         yield {"type": "done"}
     
