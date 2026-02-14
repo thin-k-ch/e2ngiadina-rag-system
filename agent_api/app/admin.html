@@ -155,6 +155,27 @@
             <label class="text-sm text-slate-400 block mb-1">Modell</label>
             <input type="text" id="cfg-online-model" class="w-full" placeholder="gpt-4o-mini">
           </div>
+          <div class="mb-4">
+            <label class="text-sm text-slate-400 block mb-2">Strategie-Modus</label>
+            <div class="flex gap-3">
+              <label class="flex items-center gap-2 cursor-pointer p-2 rounded-lg border border-slate-600 has-[:checked]:border-blue-500 has-[:checked]:bg-blue-500/10 flex-1">
+                <input type="radio" name="strategy-mode" value="routing" id="cfg-mode-routing" checked class="accent-blue-500">
+                <div>
+                  <div class="text-sm font-semibold text-white">🔀 Routing</div>
+                  <div class="text-xs text-slate-400">Cloud entscheidet nur welches Tool. Lokales Modell denkt selbst.</div>
+                  <div class="text-xs text-emerald-400 mt-0.5">Für starke lokale Modelle (llama4, deepseek-r1)</div>
+                </div>
+              </label>
+              <label class="flex items-center gap-2 cursor-pointer p-2 rounded-lg border border-slate-600 has-[:checked]:border-blue-500 has-[:checked]:bg-blue-500/10 flex-1">
+                <input type="radio" name="strategy-mode" value="planner" id="cfg-mode-planner" class="accent-blue-500">
+                <div>
+                  <div class="text-sm font-semibold text-white">📋 Planner</div>
+                  <div class="text-xs text-slate-400">Cloud erstellt kompletten Suchplan. Lokal nur Ausführung + Schreiben.</div>
+                  <div class="text-xs text-amber-400 mt-0.5">Für kleine lokale Modelle (qwen2.5:3b)</div>
+                </div>
+              </label>
+            </div>
+          </div>
           <div class="p-3 rounded-lg bg-slate-800 border border-slate-600 text-xs text-slate-400 mb-3">
             <strong class="text-amber-400">🔒 Privacy-Garantie:</strong> Nur folgende Daten gehen an die Cloud-API:
             <ul class="mt-1 space-y-0.5">
@@ -336,6 +357,9 @@ async function loadDashboard() {
     document.getElementById('cfg-online-url').value = config.online_api_url || 'https://api.openai.com/v1';
     document.getElementById('cfg-online-key').value = config.online_api_key || '';
     document.getElementById('cfg-online-model').value = config.online_model_name || 'gpt-4o-mini';
+    const mode = config.online_strategy_mode || 'routing';
+    document.getElementById('cfg-mode-routing').checked = (mode === 'routing');
+    document.getElementById('cfg-mode-planner').checked = (mode === 'planner');
     toggleOnlineFields();
   }
 
@@ -381,6 +405,7 @@ async function saveConfig() {
     online_api_url: document.getElementById('cfg-online-url').value || 'https://api.openai.com/v1',
     online_api_key: document.getElementById('cfg-online-key').value,
     online_model_name: document.getElementById('cfg-online-model').value || 'gpt-4o-mini',
+    online_strategy_mode: document.querySelector('input[name="strategy-mode"]:checked')?.value || 'routing',
   };
   const r = await api('/admin/api/config', {
     method: 'POST',

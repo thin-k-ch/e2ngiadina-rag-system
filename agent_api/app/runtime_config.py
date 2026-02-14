@@ -21,6 +21,7 @@ class RuntimeConfig:
         "online_api_url": "https://api.openai.com/v1",  # OpenAI-compatible endpoint
         "online_api_key": "",
         "online_model_name": "gpt-4o-mini",  # Fast + cheap for routing
+        "online_strategy_mode": "routing",  # "routing" = simple tool choice, "planner" = full search plan
     }
 
     def __init__(self, path: str = None):

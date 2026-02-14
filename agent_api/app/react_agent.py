@@ -671,8 +671,9 @@ class ReactAgent:
         self._online_api_url = cfg.get("online_api_url", "https://api.openai.com/v1")
         self._online_api_key = cfg.get("online_api_key", "")
         self._online_model = cfg.get("online_model_name", "gpt-4o-mini")
+        self._online_strategy_mode = cfg.get("online_strategy_mode", "routing")  # "routing" or "planner"
         if self._online_enabled and self._online_api_key:
-            print(f"☁️ Online strategy: {self._online_model} via {self._online_api_url}")
+            print(f"☁️ Online strategy: {self._online_model} via {self._online_api_url} (mode={self._online_strategy_mode})")
         elif self._online_enabled:
             print(f"⚠️ Online strategy enabled but no API key set → falling back to local")
             self._online_enabled = False
@@ -688,6 +689,209 @@ class ReactAgent:
             print(f"🧠 Model split: strategy={self.model_strategy}, answer={self.model_answer}")
         if self._use_prompt_tools_answer:
             print(f"🧠 Model {self.model_answer}: using prompt-based tool calling (no native tools)")
+    
+    async def _get_search_plan(self, query: str, chat_history: list = None) -> dict:
+        """Ask cloud model to generate a structured search plan. No doc content sent."""
+        import httpx
+        
+        planner_prompt = """Du bist ein Such-Stratege für ein RAG-System mit Schweizer Bau-/Infrastruktur-Dokumenten.
+
+Analysiere die Benutzer-Frage und erstelle einen strukturierten Suchplan als JSON.
+
+Regeln:
+- Generiere 1-3 gezielte Suchanfragen (deutsch, mit Synonymen/Fachbegriffen)
+- Entscheide ob Dokumente gelesen werden sollen (read_top_n: 0-3)
+- Gib Fokus-Hinweise für die finale Antwort
+- Bei einfachen Fragen: weniger Schritte. Bei komplexen: mehr.
+- Bei Grüssen/Small-Talk: setze "skip": true
+
+Antworte NUR mit validem JSON, kein anderer Text:
+{
+  "skip": false,
+  "queries": ["Suchanfrage 1", "Suchanfrage 2"],
+  "read_top_n": 2,
+  "focus": "Worauf die Antwort fokussieren soll",
+  "answer_format": "Prosa / Tabelle / Liste / Aufzählung",
+  "answer_hint": "Zusätzliche Hinweise für die Antwortgenerierung"
+}"""
+        
+        messages = [{"role": "system", "content": planner_prompt}]
+        if chat_history:
+            for m in chat_history[-4:]:
+                messages.append({"role": m["role"], "content": m.get("content", "")[:500]})
+        messages.append({"role": "user", "content": query})
+        
+        total_chars = sum(len(m.get("content", "")) for m in messages)
+        print(f"📋 Planner (online): {total_chars} chars, model={self._online_model}")
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(
+                    f"{self._online_api_url.rstrip('/')}/chat/completions",
+                    json={
+                        "model": self._online_model,
+                        "messages": messages,
+                        "temperature": 0.1,
+                        "max_tokens": 512,
+                    },
+                    headers={
+                        "Authorization": f"Bearer {self._online_api_key}",
+                        "Content-Type": "application/json",
+                    }
+                )
+                r.raise_for_status()
+                data = r.json()
+        except Exception as e:
+            print(f"⚠️ Planner call failed: {e}")
+            return None
+        
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        usage = data.get("usage", {})
+        print(f"📋 Planner response: {len(content)} chars, tokens={usage.get('total_tokens', '?')}")
+        
+        # Parse JSON from response (handle markdown code blocks)
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        
+        try:
+            plan = json.loads(content)
+            print(f"📋 Plan: {len(plan.get('queries', []))} queries, read_top_n={plan.get('read_top_n', 0)}, focus={plan.get('focus', '?')[:60]}")
+            return plan
+        except json.JSONDecodeError:
+            print(f"⚠️ Could not parse planner JSON: {content[:200]}")
+            return None
+    
+    async def _run_planner_mode(
+        self, query: str, chat_history: list = None,
+        system_prompt_extra: str = "",
+    ) -> AsyncGenerator[dict, None]:
+        """Planner mode: Cloud model creates search plan, local model only writes the answer."""
+        
+        yield {"type": "thinking_start"}
+        yield {"type": "phase", "content": "📋 Erstelle Suchstrategie...\n\n"}
+        
+        start_time = time.time()
+        plan = await self._get_search_plan(query, chat_history)
+        
+        # Fallback to ReAct if planner fails or says skip
+        if not plan:
+            yield {"type": "phase", "content": "⚠️ Planner-Fallback → ReAct\n\n"}
+            yield {"type": "thinking_end", "steps": 0, "elapsed": int(time.time() - start_time)}
+            # Fall through to normal run handled by caller
+            return
+        
+        if plan.get("skip"):
+            yield {"type": "thinking_end", "steps": 0, "elapsed": int(time.time() - start_time)}
+            # Simple query, no search needed – stream direct answer
+            messages = self._build_system_messages(query, chat_history, system_prompt_extra)
+            async for evt in self._stream_with_thinking(messages):
+                yield evt
+            yield {"type": "done"}
+            return
+        
+        # --- Execute plan mechanically ---
+        all_sources = []
+        all_context = []
+        steps = 0
+        
+        # Step 1: Run all search queries
+        queries = plan.get("queries", [query])
+        for sq in queries[:3]:
+            steps += 1
+            yield {"type": "phase", "content": f"🔍 Suche: *{sq[:60]}*...\n\n"}
+            yield {"type": "tool_call", "name": "search_documents", "args": {"query": sq}}
+            
+            result = await _execute_search({"query": sq}, tenant=self.tenant)
+            all_context.append(f"--- Suche '{sq}' ---\n{result}")
+            all_sources.extend(self._extract_sources(result))
+            
+            summary = f"{len(result)} Zeichen"
+            yield {"type": "tool_result", "name": "search_documents", "summary": summary}
+        
+        # Step 2: Read top documents if requested
+        read_n = plan.get("read_top_n", 0)
+        if read_n > 0 and all_sources:
+            for src in all_sources[:read_n]:
+                steps += 1
+                path = src.get("path", "")
+                if not path:
+                    continue
+                yield {"type": "phase", "content": f"📄 Lese: *{src.get('display_name', path)[:50]}*...\n\n"}
+                yield {"type": "tool_call", "name": "read_document", "args": {"path": path}}
+                
+                doc_content = await _execute_read_document({"path": path}, tenant=self.tenant)
+                all_context.append(f"--- Dokument: {path} ---\n{doc_content}")
+                
+                summary = f"{len(doc_content)} Zeichen"
+                yield {"type": "tool_result", "name": "read_document", "summary": summary}
+        
+        elapsed = int(time.time() - start_time)
+        yield {"type": "thinking_end", "steps": steps, "elapsed": elapsed}
+        
+        # Step 3: Generate final answer with local model (no reasoning needed)
+        focus = plan.get("focus", "")
+        answer_format = plan.get("answer_format", "")
+        answer_hint = plan.get("answer_hint", "")
+        
+        context_text = "\n\n".join(all_context)
+        # Truncate if too long
+        if len(context_text) > 30000:
+            context_text = context_text[:30000] + "\n\n[... gekürzt]"
+        
+        answer_instruction = f"""Beantworte die Frage basierend auf den folgenden Suchergebnissen und Dokumenten.
+{"Fokus: " + focus if focus else ""}
+{"Format: " + answer_format if answer_format else ""}
+{"Hinweis: " + answer_hint if answer_hint else ""}
+
+Antworte AUSFÜHRLICH und DETAILLIERT. Nutze Markdown. Gib Quellenverweise an."""
+        
+        messages = [
+            {"role": "system", "content": answer_instruction},
+            {"role": "user", "content": f"KONTEXT:\n{context_text}\n\nFRAGE: {query}"},
+        ]
+        
+        # Stream final answer from local model
+        async for evt in self._stream_with_thinking(messages):
+            yield evt
+        
+        # Emit sources
+        # Dedup sources
+        seen = set()
+        unique_sources = []
+        for s in all_sources:
+            fn = s.get("display_name", s.get("path", ""))
+            if fn not in seen:
+                seen.add(fn)
+                unique_sources.append(s)
+        if unique_sources:
+            yield {"type": "sources", "sources": unique_sources[:10]}
+        
+        yield {"type": "done"}
+    
+    def _build_system_messages(self, query, chat_history, system_prompt_extra=""):
+        """Build messages list with system prompt, memories, chat history, and query."""
+        system_content = REACT_SYSTEM_PROMPT
+        if self.tenant:
+            if self.tenant.glossary_line:
+                system_content = system_content.replace(
+                    "FACHBEGRIFFE: FAT=Werksabnahme, SAT=Standortabnahme, TFK=Tunnelfunk, GBT=Gotthard Basistunnel, RBT=Rhomberg Bahntechnik",
+                    self.tenant.glossary_line
+                )
+            if self.tenant.system_prompt_extra:
+                system_content += "\n\n" + self.tenant.system_prompt_extra.strip()
+        if system_prompt_extra:
+            system_content += "\n\n" + system_prompt_extra
+        from .memory_store import get_memory_store
+        tenant_id = self.tenant.short_name if self.tenant else "default"
+        memory_text = get_memory_store().format_for_prompt(tenant_id)
+        if memory_text:
+            system_content += f"\n\nLANGZEIT-GEDÄCHTNIS:\n{memory_text}"
+        messages = [{"role": "system", "content": system_content}]
+        if chat_history:
+            messages.extend(chat_history[-6:])
+        messages.append({"role": "user", "content": query})
+        return messages
     
     async def run(
         self,
@@ -706,6 +910,18 @@ class ReactAgent:
             {"type": "done"}
         """
         max_steps = max_steps or self.max_steps
+        
+        # --- Planner mode: Cloud generates search plan, local only writes answer ---
+        if self._online_enabled and self._online_strategy_mode == "planner":
+            planner_done = False
+            async for evt in self._run_planner_mode(query, chat_history, system_prompt_extra):
+                yield evt
+                if evt.get("type") == "done":
+                    planner_done = True
+            if planner_done:
+                return
+            # If planner returned without "done", it failed → fall through to ReAct
+            print(f"🔄 Planner mode failed, falling back to ReAct loop")
         
         # Build initial messages – inject tenant context
         system_content = REACT_SYSTEM_PROMPT
