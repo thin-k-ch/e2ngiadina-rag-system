@@ -142,52 +142,51 @@
           </label>
           <span class="text-sm font-semibold" id="online-status-label">Deaktiviert (komplett offline)</span>
         </div>
-        <div id="online-fields" style="display:none;">
-          <div class="mb-3">
-            <label class="text-sm text-slate-400 block mb-1">API-URL (OpenAI-kompatibel)</label>
-            <input type="text" id="cfg-online-url" class="w-full" placeholder="https://api.openai.com/v1">
+        <!-- Strategy Mode: always visible when online is enabled -->
+        <div id="online-mode-section" style="display:none;" class="mb-4">
+          <label class="text-sm text-slate-400 block mb-2">Strategie-Modus</label>
+          <div class="flex gap-3">
+            <label class="flex items-center gap-2 cursor-pointer p-3 rounded-lg border-2 border-slate-600 has-[:checked]:border-blue-500 has-[:checked]:bg-blue-500/10 flex-1">
+              <input type="radio" name="strategy-mode" value="routing" id="cfg-mode-routing" checked class="accent-blue-500">
+              <div>
+                <div class="text-sm font-bold text-white">🔀 Routing</div>
+                <div class="text-xs text-slate-400">Cloud entscheidet welches Tool. Lokales Modell denkt selbst.</div>
+                <div class="text-xs text-emerald-400 mt-0.5">Für starke lokale Modelle (llama4, deepseek-r1)</div>
+              </div>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer p-3 rounded-lg border-2 border-slate-600 has-[:checked]:border-blue-500 has-[:checked]:bg-blue-500/10 flex-1">
+              <input type="radio" name="strategy-mode" value="planner" id="cfg-mode-planner" class="accent-blue-500">
+              <div>
+                <div class="text-sm font-bold text-white">📋 Planner</div>
+                <div class="text-xs text-slate-400">Cloud erstellt kompletten Suchplan. Lokal nur Schreiben.</div>
+                <div class="text-xs text-amber-400 mt-0.5">Für kleine lokale Modelle (qwen2.5:3b)</div>
+              </div>
+            </label>
           </div>
-          <div class="mb-3">
-            <label class="text-sm text-slate-400 block mb-1">API-Key</label>
-            <input type="password" id="cfg-online-key" class="w-full" placeholder="sk-...">
-          </div>
-          <div class="mb-3">
-            <label class="text-sm text-slate-400 block mb-1">Modell</label>
-            <input type="text" id="cfg-online-model" class="w-full" placeholder="gpt-4o-mini">
-          </div>
-          <div class="mb-4">
-            <label class="text-sm text-slate-400 block mb-2">Strategie-Modus</label>
-            <div class="flex gap-3">
-              <label class="flex items-center gap-2 cursor-pointer p-2 rounded-lg border border-slate-600 has-[:checked]:border-blue-500 has-[:checked]:bg-blue-500/10 flex-1">
-                <input type="radio" name="strategy-mode" value="routing" id="cfg-mode-routing" checked class="accent-blue-500">
-                <div>
-                  <div class="text-sm font-semibold text-white">🔀 Routing</div>
-                  <div class="text-xs text-slate-400">Cloud entscheidet nur welches Tool. Lokales Modell denkt selbst.</div>
-                  <div class="text-xs text-emerald-400 mt-0.5">Für starke lokale Modelle (llama4, deepseek-r1)</div>
-                </div>
-              </label>
-              <label class="flex items-center gap-2 cursor-pointer p-2 rounded-lg border border-slate-600 has-[:checked]:border-blue-500 has-[:checked]:bg-blue-500/10 flex-1">
-                <input type="radio" name="strategy-mode" value="planner" id="cfg-mode-planner" class="accent-blue-500">
-                <div>
-                  <div class="text-sm font-semibold text-white">📋 Planner</div>
-                  <div class="text-xs text-slate-400">Cloud erstellt kompletten Suchplan. Lokal nur Ausführung + Schreiben.</div>
-                  <div class="text-xs text-amber-400 mt-0.5">Für kleine lokale Modelle (qwen2.5:3b)</div>
-                </div>
-              </label>
-            </div>
-          </div>
-          <div class="p-3 rounded-lg bg-slate-800 border border-slate-600 text-xs text-slate-400 mb-3">
-            <strong class="text-amber-400">🔒 Privacy-Garantie:</strong> Nur folgende Daten gehen an die Cloud-API:
-            <ul class="mt-1 space-y-0.5">
-              <li>✅ User-Frage (was du im Chat eingibst)</li>
-              <li>✅ Tool-Definitionen (welche Tools verfügbar sind)</li>
-              <li>✅ System-Prompt (allgemeine Anweisungen)</li>
-              <li>❌ <strong>Keine</strong> Dokument-Inhalte, Suchergebnisse oder Datei-Inhalte</li>
-              <li>❌ <strong>Keine</strong> Langzeit-Notizen / Gedächtnis</li>
-            </ul>
-          </div>
-          <button class="btn btn-primary" onclick="saveConfig()">💾 Speichern</button>
+          <button class="btn btn-primary mt-3" onclick="saveConfig()">💾 Modus speichern</button>
         </div>
+        <!-- API details: collapsible -->
+        <details id="online-details" class="mb-3">
+          <summary class="text-sm text-slate-400 cursor-pointer hover:text-slate-200 mb-2">⚙️ API-Einstellungen anzeigen</summary>
+          <div class="pl-2 border-l-2 border-slate-600 space-y-3 mt-2">
+            <div>
+              <label class="text-sm text-slate-400 block mb-1">API-URL (OpenAI-kompatibel)</label>
+              <input type="text" id="cfg-online-url" class="w-full" placeholder="https://api.openai.com/v1">
+            </div>
+            <div>
+              <label class="text-sm text-slate-400 block mb-1">API-Key</label>
+              <input type="password" id="cfg-online-key" class="w-full" placeholder="sk-...">
+            </div>
+            <div>
+              <label class="text-sm text-slate-400 block mb-1">Modell</label>
+              <input type="text" id="cfg-online-model" class="w-full" placeholder="gpt-4o-mini">
+            </div>
+            <div class="p-3 rounded-lg bg-slate-800 border border-slate-600 text-xs text-slate-400">
+              <strong class="text-amber-400">🔒 Privacy:</strong> Keine Dokument-Inhalte, Suchergebnisse oder Gedächtnis gehen an die Cloud.
+            </div>
+            <button class="btn btn-primary" onclick="saveConfig()">💾 Speichern</button>
+          </div>
+        </details>
       </div>
 
       <!-- Performance -->
@@ -383,11 +382,14 @@ async function switchTenant(shortName) {
 // --- Toggle online fields ---
 function toggleOnlineFields() {
   const enabled = document.getElementById('cfg-online-enabled').checked;
-  document.getElementById('online-fields').style.display = enabled ? 'block' : 'none';
+  document.getElementById('online-mode-section').style.display = enabled ? 'block' : 'none';
+  document.getElementById('online-details').style.display = enabled ? 'block' : 'none';
   const label = document.getElementById('online-status-label');
   if (enabled) {
     const model = document.getElementById('cfg-online-model').value || 'gpt-4o-mini';
-    label.textContent = `Aktiviert (${model})`;
+    const mode = document.querySelector('input[name="strategy-mode"]:checked')?.value || 'routing';
+    const modeLabel = mode === 'planner' ? '📋 Planner' : '🔀 Routing';
+    label.textContent = `Aktiviert – ${modeLabel} (${model})`;
     label.className = 'text-sm font-semibold text-emerald-400';
   } else {
     label.textContent = 'Deaktiviert (komplett offline)';
