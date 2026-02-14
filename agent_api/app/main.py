@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import hashlib
 import json
@@ -378,49 +379,59 @@ async def ollama_chat(request: Request, x_tenant_id: str | None = Header(default
                 
                 if etype == "thinking_start":
                     in_thinking = True
-                    yield _ollama_chunk(model_name, "<details>\n<summary>🧠 Recherche & Analyse</summary>\n\n")
+                    yield _ollama_chunk(model_name, "\n> **🧠 Recherche & Analyse**\n>\n")
                 
                 elif etype == "thinking_end":
                     steps = event.get("steps", 0)
                     elapsed = event.get("elapsed", 0)
-                    yield _ollama_chunk(model_name, f"\n*{steps} Schritte, {elapsed}s*\n\n</details>\n\n")
+                    yield _ollama_chunk(model_name, f"> \n> ✅ *{steps} Schritte, {elapsed}s*\n\n")
                     in_thinking = False
                 
                 elif etype == "keepalive":
                     elapsed = event.get("elapsed", 0)
-                    yield _ollama_chunk(model_name, f"  ⏳ *Denke nach... ({elapsed}s)*\n\n")
+                    phase_hint = event.get("hint", "")
+                    if phase_hint:
+                        yield _ollama_chunk(model_name, f"> ⏳ *{phase_hint} ({elapsed}s)*\n")
+                    else:
+                        yield _ollama_chunk(model_name, f"> ⏳ *Verarbeite... ({elapsed}s)*\n")
                 
                 elif etype == "phase":
                     content = event.get("content", "")
                     if content:
-                        yield _ollama_chunk(model_name, content)
+                        yield _ollama_chunk(model_name, f"> {content}")
                 
                 elif etype == "tool_call":
                     name = event.get("name", "")
                     args = event.get("args", {})
-                    args_short = json.dumps(args, ensure_ascii=False)[:120]
-                    yield _ollama_chunk(model_name, f"  🔧 `{name}` {args_short}\n\n")
+                    args_short = json.dumps(args, ensure_ascii=False)[:100]
+                    yield _ollama_chunk(model_name, f"> 🔧 `{name}` {args_short}\n")
                 
                 elif etype == "tool_result":
                     name = event.get("name", "")
                     summary = event.get("summary", "")
-                    yield _ollama_chunk(model_name, f"  ✅ {name} → {summary}\n\n")
+                    yield _ollama_chunk(model_name, f"> ✅ {name} → {summary}\n")
                 
                 elif etype == "reasoning_start":
                     in_reasoning = True
-                    yield _ollama_chunk(model_name, "<details>\n<summary>💭 Überlegung</summary>\n\n")
+                    yield _ollama_chunk(model_name, "\n> **💭 Überlegung**\n> ")
                 
                 elif etype == "reasoning_token":
-                    yield _ollama_chunk(model_name, event.get("content", ""))
+                    # Prefix newlines with > for blockquote continuation
+                    content = event.get("content", "")
+                    content = content.replace("\n", "\n> ")
+                    yield _ollama_chunk(model_name, content)
                 
                 elif etype == "reasoning_end":
-                    yield _ollama_chunk(model_name, "\n\n</details>\n\n")
+                    yield _ollama_chunk(model_name, "\n\n")
                     in_reasoning = False
                 
                 elif etype == "token":
                     content = event.get("content", "")
                     if content:
-                        yield _ollama_chunk(model_name, content)
+                        # Strip raw special tokens that leak from some models
+                        content = re.sub(r'<\|[^|]+\|>', '', content)
+                        if content:
+                            yield _ollama_chunk(model_name, content)
                 
                 elif etype == "sources":
                     src_list = event.get("sources", [])

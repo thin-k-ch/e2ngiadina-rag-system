@@ -196,32 +196,32 @@ TOOLS (nutze sie aktiv – vermute nicht, suche und lies!):
 ARBEITSWEISE:
 1. Frage analysieren → passende Tools wählen
 2. Dokumentenfragen: search_documents → DANN read_document für die relevantesten Treffer!
-   Die Suche liefert nur kurze Snippets. Lies das vollständige Dokument um exakte Details zu finden.
-3. Dateisystem (zählen, listen): execute_python oder list_files
-4. Datenanalyse (CSV, Excel): execute_python mit pandas
-5. Transkript → Protokoll: create_protocol (GESAMTEN Text übergeben, nicht kürzen)
-6. Externes Wissen (Normen, Preise, Nachrichten): web_search
-7. Mehrere Tools kombinieren und mehrere Schritte machen
-8. Erst wenn du exakte Fakten aus den Dokumenten hast → Antwort formulieren
+   Die Suche liefert nur kurze Snippets. Lies das VOLLSTÄNDIGE Dokument mit read_document um exakte Details, Definitionen und Vertragsklauseln zu finden.
+3. IMMER mindestens 1x read_document aufrufen bevor du antwortest – Snippets allein reichen NICHT.
+4. Dateisystem (zählen, listen): execute_python oder list_files
+5. Datenanalyse (CSV, Excel): execute_python mit pandas
+6. Transkript → Protokoll: create_protocol (GESAMTEN Text übergeben, nicht kürzen)
+7. Externes Wissen (Normen, Preise, Nachrichten): web_search
+8. Mehrere Tools kombinieren und mehrere Schritte machen
 
 ANTWORT-REGELN:
-- Antworte auf Deutsch, AUSFÜHRLICH und DETAILLIERT
-- Starte DIREKT mit Fakten – KEINE Einleitungen ("Basierend auf...", "Gerne...", "Hier sind...")
-- ZITIERE exakte Textpassagen aus den Dokumenten in Anführungszeichen: "exakter Text" [N]
+- Antworte auf Deutsch
+- Starte DIREKT mit der konkreten Antwort – KEINE Einleitungen ("Basierend auf...", "Gerne...", "Es scheint...")
+- ZITIERE exakte Textpassagen aus den Dokumenten in Anführungszeichen: "exakter Text" [Dateiname]
 - Nenne Seitenzahlen, Datumswerte und Kapitelnummern wenn verfügbar
-- Verwende Indikativ, nicht Konjunktiv (schreibe "Der Vertrag regelt..." statt "Der Vertrag könnte regeln...")
+- Verwende Indikativ, nicht Konjunktiv ("Der Vertrag regelt..." statt "Der Vertrag könnte regeln...")
+- Nenne die KONKRETEN Dokumente, in denen die Information steht (Vertrag, Protokoll, E-Mail etc.)
 - Strukturiere mit Markdown: Überschriften (##), Aufzählungen, **Fettdruck** für Schlüsselbegriffe
-- Sei GRÜNDLICH und VOLLSTÄNDIG: Erkläre Zusammenhänge, nenne alle relevanten Details aus den Dokumenten
-- Gib IMMER den vollständigen Kontext: Wer, Was, Wann, Warum – nicht nur Stichworte
-- Wenn mehrere Dokumente relevant sind: fasse die Informationen aus ALLEN zusammen
-- Mindestens 3-5 Absätze bei Sachfragen – kurze Antworten nur bei einfachen Faktenfragen
+- Wenn du ein Hauptdokument findest (z.B. Werkvertrag, Pflichtenheft), nenne es PROMINENT am Anfang
 - Bei Begrüssungen (Hallo, Hi): antworte kurz und freundlich, liste NICHT deine Tools auf
 
 VERBOTEN:
-- Erfinde NIEMALS URLs oder Links (kein example.com, kein https://...). Quellen-Links werden automatisch angehängt. Verweise nur mit [Pfad] oder [N].
+- KEINE vagen Aussagen wie "scheint zu sein", "könnte sein", "es gibt Hinweise"
+- KEINE allgemeinen Beschreibungen wenn du konkrete Fakten aus den Dokumenten hast
+- Erfinde NIEMALS URLs oder Links. Quellen-Links werden automatisch angehängt. Verweise nur mit [Dateiname] oder [N].
 - Für Dateisystem-Fragen IMMER execute_python nutzen, NICHT search_documents.
 - Sage NICHT "Ich konnte leider keine Informationen finden" wenn du noch nicht alle Tools versucht hast.
-- Keine Vermutungen oder Spekulationen – wenn du unsicher bist, suche weiter oder sage klar was fehlt."""
+- Keine Vermutungen – wenn du unsicher bist, lies das Dokument mit read_document oder suche weiter."""
 
 # ---------------------------------------------------------------------------
 # Tool Execution
@@ -1078,16 +1078,28 @@ class ReactAgent:
                     print(f"❌ LLM stream failed (attempt 2/2): {type(e).__name__}: {e}")
                     raise LLMError(f"LLM-Streaming fehlgeschlagen nach 2 Versuchen: {type(last_err).__name__}")
     
-    async def _llm_with_tools_keepalive(self, messages: list) -> AsyncGenerator[dict, None]:
+    async def _llm_with_tools_keepalive(self, messages: list, hint: str = "") -> AsyncGenerator[dict, None]:
         """Wrap _llm_with_tools: yields keepalive events every 5s while waiting for LLM."""
         task = asyncio.create_task(self._llm_with_tools(messages))
+        # Determine context hint for keepalive messages
+        if not hint:
+            # Derive hint from last message context
+            last_tool = None
+            for m in reversed(messages):
+                if m.get("role") == "tool":
+                    last_tool = "Analysiere Suchergebnisse"
+                    break
+                if m.get("role") == "user":
+                    hint = "Analysiere Anfrage"
+                    break
+            hint = last_tool or hint or "Plane nächsten Schritt"
         start = time.time()
         while not task.done():
             done, _ = await asyncio.wait({task}, timeout=5.0)
             if done:
                 break
             elapsed = int(time.time() - start)
-            yield {"type": "keepalive", "elapsed": elapsed}
+            yield {"type": "keepalive", "elapsed": elapsed, "hint": hint}
         
         if task.cancelled():
             raise LLMError("LLM-Aufruf abgebrochen")
@@ -1330,7 +1342,7 @@ for item in sorted(os.listdir(DATA_ROOT)):
         """Extract source paths from search result text with snippet previews and dedup."""
         import re
         sources = []
-        seen_paths = set()
+        seen_filenames = set()
         file_base = self.tenant.document_root if self.tenant else os.getenv("FILE_BASE", "/media/felix/RAG/1")
         
         # Parse [N] path\nsnippet blocks
@@ -1343,9 +1355,13 @@ for item in sorted(os.listdir(DATA_ROOT)):
             path = m.group(2).strip()
             snippet = (m.group(3) or "").strip()[:150]
             
-            if not path or path in seen_paths:
+            if not path:
                 continue
-            seen_paths.add(path)
+            # Dedup by filename (not full path) to catch duplicate entries with different prefixes
+            filename = os.path.basename(path)
+            if filename in seen_filenames:
+                continue
+            seen_filenames.add(filename)
             
             from urllib.parse import quote
             encoded = quote(f"{file_base}/{path}", safe="/:@")
