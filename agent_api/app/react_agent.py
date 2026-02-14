@@ -831,35 +831,35 @@ Antworte NUR mit validem JSON, kein anderer Text:
         elapsed = int(time.time() - start_time)
         yield {"type": "thinking_end", "steps": steps, "elapsed": elapsed}
         
-        # Step 3: Generate final answer with local model (no reasoning needed)
+        # Step 3: Generate final answer – use same format as ReAct loop
+        # Build messages like the ReAct loop would: system prompt + tool calls + results + user query
         focus = plan.get("focus", "")
         answer_format = plan.get("answer_format", "")
         answer_hint = plan.get("answer_hint", "")
         
-        context_text = "\n\n".join(all_context)
-        # Truncate if too long
-        if len(context_text) > 30000:
-            context_text = context_text[:30000] + "\n\n[... gekürzt]"
+        messages = self._build_system_messages(query, chat_history, system_prompt_extra)
         
-        answer_instruction = f"""Du bist ein Dokumenten-Analyst. Dir wurden Suchergebnisse und Dokument-Inhalte bereitgestellt.
-
-WICHTIG:
-- Du HAST Zugriff auf die Dokumente – der Inhalt steht im KONTEXT unten.
-- Zitiere WORTGENAU aus dem Kontext wenn der User das verlangt.
-- Sage NIEMALS "ich habe keinen Zugriff" oder "nicht verfügbar" – die Daten sind da.
-- Wenn eine Information nicht im Kontext steht, sage "Im bereitgestellten Kontext nicht enthalten."
-{"Fokus: " + focus if focus else ""}
-{"Format: " + answer_format if answer_format else ""}
-{"Hinweis: " + answer_hint if answer_hint else ""}
-
-Antworte AUSFÜHRLICH und DETAILLIERT. Nutze Markdown. Gib Quellenverweise an."""
+        # Insert tool results BEFORE the final user message (like ReAct does)
+        user_msg = messages.pop()  # Remove the user query (will re-add at end)
         
-        messages = [
-            {"role": "system", "content": answer_instruction},
-            {"role": "user", "content": f"KONTEXT:\n{context_text}\n\nFRAGE: {query}"},
-        ]
+        for ctx in all_context:
+            # Truncate individual tool results if too long
+            truncated = ctx[:12000] if len(ctx) > 12000 else ctx
+            messages.append({"role": "assistant", "content": f"Ich habe folgende Informationen gefunden:"})
+            messages.append({"role": "tool", "content": truncated})
         
-        # Stream final answer from local model
+        # Add focus/format hints as a brief assistant note if present
+        hints = []
+        if focus: hints.append(f"Fokus: {focus}")
+        if answer_format: hints.append(f"Format: {answer_format}")
+        if answer_hint: hints.append(answer_hint)
+        if hints:
+            messages.append({"role": "assistant", "content": " | ".join(hints)})
+        
+        # Re-add user query
+        messages.append(user_msg)
+        
+        # Stream final answer from local model (same method as ReAct)
         async for evt in self._stream_with_thinking(messages):
             yield evt
         
