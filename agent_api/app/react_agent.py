@@ -337,12 +337,64 @@ async def _execute_read_document(args: dict, tenant=None) -> str:
     if not content:
         return f"Dokument nicht gefunden: {path}"
     
-    # Truncate very long documents
-    max_chars = 12000
-    if len(content) > max_chars:
-        content = content[:max_chars] + f"\n\n[... gekürzt, {len(content)} Zeichen total]"
+    max_chars = 20000
+    total_len = len(content)
     
-    return f"=== {path} ===\n{content}"
+    if total_len > max_chars:
+        # Smart truncation: try to find the relevant section using the query
+        query_hint = args.get("query_hint", "")
+        best_section = _find_relevant_section(content, query_hint, max_chars)
+        if best_section:
+            content = best_section
+        else:
+            content = content[:max_chars] + f"\n\n[... gekürzt, {total_len} Zeichen total]"
+    
+    return f"=== {path} ({total_len} Zeichen) ===\n{content}"
+
+
+def _find_relevant_section(content: str, query_hint: str, max_chars: int) -> str:
+    """Find the most relevant section in a long document based on query keywords.
+    Returns a section of max_chars around the best match, or None if no good match."""
+    if not query_hint:
+        return None
+    
+    import re
+    # Extract meaningful keywords from query (skip very short words)
+    words = [w.lower() for w in re.findall(r'\w+', query_hint) if len(w) >= 4]
+    if not words:
+        return None
+    
+    # Score each position by keyword density in a sliding window
+    content_lower = content.lower()
+    best_score = 0
+    best_pos = 0
+    window = 3000  # Score window
+    step = 500
+    
+    for pos in range(0, len(content) - window, step):
+        chunk = content_lower[pos:pos + window]
+        score = sum(chunk.count(w) for w in words)
+        if score > best_score:
+            best_score = score
+            best_pos = pos
+    
+    if best_score == 0:
+        return None
+    
+    # Extract section centered on best position, with some context before
+    half = max_chars // 2
+    start = max(0, best_pos - half // 3)  # More text after the match than before
+    end = min(len(content), start + max_chars)
+    start = max(0, end - max_chars)
+    
+    section = content[start:end]
+    
+    # Add markers
+    prefix = f"[... Dokument ab Position {start}/{len(content)}]\n" if start > 0 else ""
+    suffix = f"\n[... gekürzt, {len(content)} Zeichen total]" if end < len(content) else ""
+    
+    print(f"📌 Smart-Truncation: found relevant section at pos {best_pos}, score={best_score}, showing {start}-{end}/{len(content)}")
+    return prefix + section + suffix
 
 
 async def _execute_python(args: dict, tenant=None) -> str:
@@ -839,7 +891,7 @@ WICHTIG für answer_hint:
                 yield {"type": "phase", "content": f"📄 Lese: *{src.get('display_name', path)[:50]}*...\n\n"}
                 yield {"type": "tool_call", "name": "read_document", "args": {"path": path}}
                 
-                doc_content = await _execute_read_document({"path": path}, tenant=self.tenant)
+                doc_content = await _execute_read_document({"path": path, "query_hint": query}, tenant=self.tenant)
                 read_context.append(f"--- Dokument: {path} ---\n{doc_content}")
                 read_sources.append(src)
                 
@@ -1076,6 +1128,9 @@ WICHTIG für answer_hint:
                     executor = TOOL_EXECUTORS.get(tool_name)
                     if executor:
                         try:
+                            # Pass query hint for smart truncation in read_document
+                            if tool_name == "read_document" and "query_hint" not in tool_args:
+                                tool_args["query_hint"] = query
                             result = await executor(tool_args, tenant=self.tenant)
                             # Collect sources from search results
                             if tool_name == "search_documents":
