@@ -387,9 +387,16 @@ function toggleOnlineFields() {
   const label = document.getElementById('online-status-label');
   if (enabled) {
     const model = document.getElementById('cfg-online-model').value || 'gpt-4o-mini';
+    const apiUrl = document.getElementById('cfg-online-url').value || '';
     const mode = document.querySelector('input[name="strategy-mode"]:checked')?.value || 'routing';
     const modeLabel = mode === 'planner' ? '📋 Planner' : '🔀 Routing';
-    label.textContent = `Aktiviert – ${modeLabel} | Online: ${model}`;
+    // Extract provider name from API URL
+    let provider = 'Cloud';
+    if (apiUrl.includes('groq.com')) provider = 'Groq';
+    else if (apiUrl.includes('openai.com')) provider = 'OpenAI';
+    else if (apiUrl.includes('together.ai') || apiUrl.includes('together.xyz')) provider = 'Together.ai';
+    else if (apiUrl.includes('anthropic.com')) provider = 'Anthropic';
+    label.textContent = `Aktiviert – ${modeLabel} | ${provider}: ${model}`;
     label.className = 'text-sm font-semibold text-emerald-400';
   } else {
     label.textContent = 'Deaktiviert (komplett offline)';
