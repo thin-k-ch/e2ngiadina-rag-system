@@ -202,6 +202,64 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_documents",
+            "description": "Vergleicht zwei Dokumente und zeigt die Unterschiede (Diff). "
+                           "Nutze dies wenn der Benutzer fragt, was sich zwischen zwei Versionen "
+                           "geändert hat (z.B. Werkvertrag V1 vs V2, Protokoll-Versionen, etc.). "
+                           "Suche zuerst mit search_documents nach den beiden Dokumenten.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path_a": {
+                        "type": "string",
+                        "description": "Pfad zum ersten (älteren) Dokument"
+                    },
+                    "path_b": {
+                        "type": "string",
+                        "description": "Pfad zum zweiten (neueren) Dokument"
+                    },
+                    "focus": {
+                        "type": "string",
+                        "description": "Optionaler Fokus: Worauf soll beim Vergleich besonders geachtet werden? (z.B. 'Preise', 'Fristen', 'Pönalen')"
+                    }
+                },
+                "required": ["path_a", "path_b"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "summarize_document",
+            "description": "Fasst ein ganzes Dokument kapitelweise zusammen. Erstellt eine strukturierte "
+                           "Zusammenfassung mit Executive Summary und Kapitel-Übersicht. "
+                           "Nutze dies wenn der Benutzer 'Fasse zusammen', 'Zusammenfassung', 'Summary', "
+                           "'Überblick' oder 'Was steht in...' sagt. "
+                           "Suche zuerst mit search_documents nach dem Dokument.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Pfad zum Dokument (aus search_documents Ergebnis)"
+                    },
+                    "focus": {
+                        "type": "string",
+                        "description": "Optionaler Fokus: Worauf soll die Zusammenfassung besonders achten? (z.B. 'Fristen und Kosten', 'technische Anforderungen')"
+                    },
+                    "detail_level": {
+                        "type": "string",
+                        "description": "Detailgrad: 'kurz' (Executive Summary), 'mittel' (Standard), 'ausführlich' (kapitelweise Detail-Zusammenfassung)",
+                        "enum": ["kurz", "mittel", "ausführlich"]
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -221,6 +279,8 @@ TOOLS (nutze sie aktiv – vermute nicht, suche und lies!):
 - read_file: Datei direkt vom Dateisystem lesen (CSV, TXT, Log)
 - web_search: Im Internet suchen (Normen, Technologie, Nachrichten)
 - manage_memory: Langzeit-Gedächtnis verwalten (Notizen speichern/abrufen/löschen über Sitzungen hinweg)
+- compare_documents: Zwei Dokumente vergleichen (Diff/Änderungen zwischen Versionen)
+- summarize_document: Ganzes Dokument kapitelweise zusammenfassen (Executive Summary + Detail)
 
 ARBEITSWEISE:
 1. Frage analysieren → passende Tools wählen
@@ -757,6 +817,294 @@ async def _execute_manage_memory(args: dict, tenant=None) -> str:
     return f"Unbekannte Aktion: {action}. Verwende 'save', 'list', 'search' oder 'delete'."
 
 
+async def _execute_compare_documents(args: dict, tenant=None) -> str:
+    """Execute compare_documents tool – structured diff between two documents."""
+    import difflib
+    
+    path_a = args.get("path_a", "")
+    path_b = args.get("path_b", "")
+    focus = args.get("focus", "")
+    
+    if not path_a or not path_b:
+        return "Fehler: Zwei Dokumentpfade (path_a, path_b) sind erforderlich."
+    
+    from .source_analyzer import fetch_document_text
+    
+    es_index = tenant.es_index if tenant else None
+    
+    # Fetch both documents
+    print(f"📊 compare_documents: A={path_a[-60:]} vs B={path_b[-60:]}")
+    content_a, meta_a = await fetch_document_text(path_a, es_index=es_index)
+    content_b, meta_b = await fetch_document_text(path_b, es_index=es_index)
+    
+    if not content_a:
+        return f"Dokument A nicht gefunden: {path_a}"
+    if not content_b:
+        return f"Dokument B nicht gefunden: {path_b}"
+    
+    name_a = os.path.basename(path_a)
+    name_b = os.path.basename(path_b)
+    
+    # Split into paragraphs for meaningful comparison
+    def to_paragraphs(text):
+        import re
+        # Split on double newlines or section headers
+        paras = re.split(r'\n{2,}|\n(?=\d+[\.\)]\s)|(?=#{1,3}\s)', text)
+        return [p.strip() for p in paras if p.strip()]
+    
+    paras_a = to_paragraphs(content_a)
+    paras_b = to_paragraphs(content_b)
+    
+    # Compute unified diff at paragraph level
+    diff = list(difflib.unified_diff(
+        paras_a, paras_b,
+        fromfile=name_a, tofile=name_b,
+        lineterm="", n=1
+    ))
+    
+    # Also compute similarity ratio
+    matcher = difflib.SequenceMatcher(None, content_a, content_b)
+    similarity = matcher.ratio()
+    
+    # Categorize changes
+    added = []
+    removed = []
+    for line in diff:
+        if line.startswith('+') and not line.startswith('+++'):
+            added.append(line[1:].strip())
+        elif line.startswith('-') and not line.startswith('---'):
+            removed.append(line[1:].strip())
+    
+    # Build structured report
+    parts = [
+        f"=== DOKUMENTEN-VERGLEICH ===",
+        f"Dokument A: {name_a} ({len(content_a):,} Zeichen, {len(paras_a)} Absätze)",
+        f"Dokument B: {name_b} ({len(content_b):,} Zeichen, {len(paras_b)} Absätze)",
+        f"Ähnlichkeit: {similarity:.0%}",
+        f"Änderungen: {len(removed)} entfernt, {len(added)} hinzugefügt",
+        "",
+    ]
+    
+    # If focus given, filter changes for relevant ones
+    if focus:
+        focus_lower = focus.lower()
+        focus_words = [w for w in focus_lower.split() if len(w) >= 3]
+        
+        def is_relevant(text):
+            tl = text.lower()
+            return any(w in tl for w in focus_words)
+        
+        relevant_removed = [r for r in removed if is_relevant(r)]
+        relevant_added = [a for a in added if is_relevant(a)]
+        
+        if relevant_removed or relevant_added:
+            parts.append(f"--- FOKUS: {focus} ---")
+            if relevant_removed:
+                parts.append(f"\n🔴 ENTFERNT (Fokus '{focus}'):")
+                for r in relevant_removed[:15]:
+                    parts.append(f"  - {r[:300]}")
+            if relevant_added:
+                parts.append(f"\n🟢 HINZUGEFÜGT (Fokus '{focus}'):")
+                for a in relevant_added[:15]:
+                    parts.append(f"  + {a[:300]}")
+            parts.append("")
+    
+    # Show all changes (truncated)
+    max_changes = 20
+    if removed:
+        parts.append(f"🔴 ENTFERNTE ABSCHNITTE ({len(removed)} total, zeige max {max_changes}):")
+        for r in removed[:max_changes]:
+            parts.append(f"  - {r[:200]}")
+    
+    if added:
+        parts.append(f"\n🟢 NEUE ABSCHNITTE ({len(added)} total, zeige max {max_changes}):")
+        for a in added[:max_changes]:
+            parts.append(f"  + {a[:200]}")
+    
+    if not added and not removed:
+        parts.append("✅ Keine inhaltlichen Unterschiede gefunden (Dokumente sind identisch oder sehr ähnlich).")
+    
+    result = "\n".join(parts)
+    # Truncate if too long
+    if len(result) > 15000:
+        result = result[:15000] + f"\n\n[... gekürzt, {len(result)} Zeichen total]"
+    
+    print(f"📊 compare_documents: {similarity:.0%} similar, {len(removed)} removed, {len(added)} added")
+    return result
+
+
+async def _execute_summarize_document(args: dict, tenant=None) -> str:
+    """Execute summarize_document tool – chapter-wise document summarization."""
+    import re
+    
+    path = args.get("path", "")
+    focus = args.get("focus", "")
+    detail_level = args.get("detail_level", "mittel")
+    
+    if not path:
+        return "Fehler: Kein Dokumentpfad angegeben."
+    
+    from .source_analyzer import fetch_document_text
+    from .rag_pipeline import SimpleRAGPipeline
+    
+    es_index = tenant.es_index if tenant else None
+    content, metadata = await fetch_document_text(path, es_index=es_index)
+    
+    if not content:
+        return f"Dokument nicht gefunden: {path}"
+    
+    doc_name = os.path.basename(path)
+    total_chars = len(content)
+    print(f"📑 summarize_document: {doc_name} ({total_chars:,} Zeichen), detail={detail_level}, focus={focus or 'allgemein'}")
+    
+    # --- Detect chapter structure ---
+    # Pattern: numbered sections (1. / 1.1 / Art. 5 / Kapitel 3), markdown headings, or UPPERCASE lines
+    chapter_pattern = re.compile(
+        r'^(?:'
+        r'(?:Art\.?\s*\d+|Artikel\s+\d+)'          # Art. 5 / Artikel 5
+        r'|(?:\d+\.(?:\d+\.?)*)\s+\S'               # 1. / 1.1 / 1.2.3 Title
+        r'|#{1,4}\s+\S'                              # Markdown headings
+        r'|(?:Kapitel|Abschnitt|Teil|Anhang)\s+\S'   # Kapitel/Abschnitt/Teil
+        r'|[A-ZÄÖÜ][A-ZÄÖÜ\s\-]{8,}$'              # UPPERCASE HEADINGS (min 8 chars)
+        r')',
+        re.MULTILINE
+    )
+    
+    lines = content.split('\n')
+    chapters = []
+    current_title = "Einleitung"
+    current_lines = []
+    
+    for line in lines:
+        stripped = line.strip()
+        if stripped and chapter_pattern.match(stripped) and len(current_lines) > 3:
+            # Save previous chapter
+            chapter_text = '\n'.join(current_lines).strip()
+            if chapter_text:
+                chapters.append({"title": current_title, "text": chapter_text})
+            current_title = stripped[:120]
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+    
+    # Don't forget last chapter
+    if current_lines:
+        chapter_text = '\n'.join(current_lines).strip()
+        if chapter_text:
+            chapters.append({"title": current_title, "text": chapter_text})
+    
+    # If no chapters detected (or just 1), split by size
+    if len(chapters) <= 1 and total_chars > 3000:
+        chunk_size = 4000
+        chapters = []
+        for i in range(0, total_chars, chunk_size):
+            chunk = content[i:i + chunk_size]
+            # Try to break at paragraph boundary
+            if i + chunk_size < total_chars:
+                last_para = chunk.rfind('\n\n')
+                if last_para > chunk_size // 2:
+                    chunk = chunk[:last_para]
+            first_line = chunk.strip().split('\n')[0][:80]
+            chapters.append({"title": f"Abschnitt {len(chapters)+1}: {first_line}", "text": chunk})
+    
+    print(f"📑 Detected {len(chapters)} chapters/sections")
+    
+    # --- Summarize each chapter via LLM ---
+    model = os.getenv("OLLAMA_MODEL_ANSWER", "llama4:latest")
+    pipeline = SimpleRAGPipeline(model=model)
+    
+    # Detail-level configuration
+    if detail_level == "kurz":
+        max_words = 50
+        max_chapters = 8
+        instruction = "Fasse in 1-2 Sätzen zusammen. Nur die Kernaussage."
+    elif detail_level == "ausführlich":
+        max_words = 200
+        max_chapters = 20
+        instruction = "Fasse ausführlich zusammen. Nenne konkrete Fakten, Zahlen, Daten, Namen und Fristen."
+    else:  # mittel
+        max_words = 100
+        max_chapters = 12
+        instruction = "Fasse in 3-5 Sätzen zusammen. Nenne die wichtigsten Fakten und Zahlen."
+    
+    focus_hint = f" Fokus besonders auf: {focus}." if focus else ""
+    
+    # Limit chapters to process
+    chapters_to_process = chapters[:max_chapters]
+    
+    chapter_summaries = []
+    for i, ch in enumerate(chapters_to_process):
+        ch_text = ch["text"][:8000]  # Max 8K per chapter for LLM context
+        
+        summary_prompt = [
+            {"role": "system", "content": (
+                f"Du bist ein präziser Dokumenten-Zusammenfasser. {instruction}{focus_hint} "
+                f"Antworte auf Deutsch. Keine Einleitungen, direkt die Zusammenfassung. "
+                f"Maximal {max_words} Wörter."
+            )},
+            {"role": "user", "content": (
+                f"Fasse folgenden Abschnitt zusammen:\n\n"
+                f"--- {ch['title']} ---\n{ch_text}"
+            )}
+        ]
+        
+        try:
+            summary = await pipeline._llm_complete(summary_prompt, temperature=0.3)
+            chapter_summaries.append({"title": ch["title"], "summary": summary.strip(), "chars": len(ch["text"])})
+            print(f"  ✅ Chapter {i+1}/{len(chapters_to_process)}: {ch['title'][:50]} → {len(summary)} chars")
+        except Exception as e:
+            print(f"  ❌ Chapter {i+1} failed: {e}")
+            chapter_summaries.append({"title": ch["title"], "summary": f"(Zusammenfassung fehlgeschlagen: {e})", "chars": len(ch["text"])})
+    
+    # --- Generate Executive Summary from chapter summaries ---
+    all_chapter_text = "\n".join(f"- {cs['title']}: {cs['summary']}" for cs in chapter_summaries)
+    
+    exec_prompt = [
+        {"role": "system", "content": (
+            f"Du bist ein präziser Dokumenten-Zusammenfasser. Erstelle eine Executive Summary "
+            f"(max 200 Wörter) aus den folgenden Kapitel-Zusammenfassungen.{focus_hint} "
+            f"Nenne die wichtigsten Fakten, Zahlen und Schlüsselbegriffe. Deutsch. Keine Einleitung."
+        )},
+        {"role": "user", "content": (
+            f"Dokument: {doc_name}\n\n"
+            f"Kapitel-Zusammenfassungen:\n{all_chapter_text}"
+        )}
+    ]
+    
+    try:
+        executive_summary = await pipeline._llm_complete(exec_prompt, temperature=0.3)
+    except Exception as e:
+        executive_summary = f"(Executive Summary fehlgeschlagen: {e})"
+    
+    # --- Build structured output ---
+    parts = [
+        f"=== ZUSAMMENFASSUNG: {doc_name} ===",
+        f"Umfang: {total_chars:,} Zeichen, {len(chapters)} Kapitel erkannt",
+        f"Detailgrad: {detail_level}" + (f", Fokus: {focus}" if focus else ""),
+        "",
+        f"## Executive Summary",
+        executive_summary.strip(),
+        "",
+        f"## Kapitel-Übersicht ({len(chapter_summaries)} Abschnitte)",
+    ]
+    
+    for i, cs in enumerate(chapter_summaries, 1):
+        parts.append(f"\n### {i}. {cs['title']}")
+        parts.append(f"({cs['chars']:,} Zeichen)")
+        parts.append(cs["summary"])
+    
+    if len(chapters) > max_chapters:
+        parts.append(f"\n[... {len(chapters) - max_chapters} weitere Kapitel nicht zusammengefasst. "
+                     f"Nutze detail_level='ausführlich' für mehr.]")
+    
+    result = "\n".join(parts)
+    if len(result) > 20000:
+        result = result[:20000] + f"\n\n[... gekürzt, {len(result)} Zeichen total]"
+    
+    print(f"📑 summarize_document: done, {len(chapter_summaries)} chapters, {len(result)} chars output")
+    return result
+
+
 TOOL_EXECUTORS = {
     "search_documents": _execute_search,
     "read_document": _execute_read_document,
@@ -766,6 +1114,8 @@ TOOL_EXECUTORS = {
     "read_file": _execute_read_file,
     "web_search": _execute_web_search,
     "manage_memory": _execute_manage_memory,
+    "compare_documents": _execute_compare_documents,
+    "summarize_document": _execute_summarize_document,
 }
 
 # ---------------------------------------------------------------------------
@@ -943,6 +1293,12 @@ WICHTIG für answer_hint:
             yield {"type": "done"}
             return
         
+        # --- Detect special modes: summary, compare ---
+        _SUMMARY_KEYWORDS = {"zusammenfass", "summary", "überblick", "fasse zusammen", "fass zusammen",
+                             "was steht in", "worum geht es", "inhalt von", "executive summary"}
+        q_lower = query.lower()
+        wants_summary = any(kw in q_lower for kw in _SUMMARY_KEYWORDS)
+        
         # --- Execute plan mechanically ---
         all_sources = []
         search_context = []
@@ -964,7 +1320,42 @@ WICHTIG für answer_hint:
             summary = f"{len(result)} Zeichen"
             yield {"type": "tool_result", "name": "search_documents", "summary": summary}
         
-        # Step 2: Read top documents if requested (max 3, dedup by path)
+        # Step 2a: SUMMARY MODE — call summarize_document for the top result
+        if wants_summary and all_sources:
+            top_path = all_sources[0].get("path", "")
+            top_name = all_sources[0].get("display_name", top_path.split("/")[-1])
+            focus = plan.get("focus", "")
+            
+            # Detect detail level from query
+            detail_level = "mittel"
+            if any(w in q_lower for w in ("ausführlich", "detail", "genau")):
+                detail_level = "ausführlich"
+            elif any(w in q_lower for w in ("kurz", "knapp", "executive")):
+                detail_level = "kurz"
+            
+            steps += 1
+            yield {"type": "phase", "content": f"📑 Zusammenfassung ({detail_level}): *{top_name[:50]}*...\n\n"}
+            yield {"type": "tool_call", "name": "summarize_document", "args": {"path": top_path, "focus": focus, "detail_level": detail_level}}
+            
+            summary_result = await _execute_summarize_document(
+                {"path": top_path, "focus": focus, "detail_level": detail_level},
+                tenant=self.tenant
+            )
+            
+            yield {"type": "tool_result", "name": "summarize_document", "summary": f"{len(summary_result)} Zeichen"}
+            
+            elapsed = int(time.time() - start_time)
+            yield {"type": "thinking_end", "steps": steps, "elapsed": elapsed}
+            
+            # Stream the summary directly as the answer
+            yield {"type": "token", "content": summary_result}
+            
+            # Emit source
+            yield {"type": "sources", "sources": [all_sources[0]]}
+            yield {"type": "done"}
+            return
+        
+        # Step 2b: Read top documents if requested (max 3, dedup by path)
         read_n = min(plan.get("read_top_n", 0), 3)
         if read_n > 0 and all_sources:
             seen_paths = set()
@@ -2085,6 +2476,14 @@ for item in sorted(os.listdir(DATA_ROOT)):
             action = args.get("action", "")
             labels = {"save": "💾 Speichere Notiz", "list": "📋 Notizen abrufen", "search": "🔍 Notizen suchen", "delete": "🗑️ Notiz löschen"}
             return f"{labels.get(action, '🧠 Gedächtnis')}...\n\n"
+        elif tool_name == "compare_documents":
+            a = args.get("path_a", "").split("/")[-1][:30]
+            b = args.get("path_b", "").split("/")[-1][:30]
+            return f"📊 Vergleiche: *{a}* vs *{b}*...\n\n"
+        elif tool_name == "summarize_document":
+            p = args.get("path", "").split("/")[-1][:50]
+            detail = args.get("detail_level", "mittel")
+            return f"📑 Zusammenfassung ({detail}): *{p}*...\n\n"
         return f"🔧 {tool_name}...\n\n"
     
     def _extract_sources(self, search_result: str) -> list:

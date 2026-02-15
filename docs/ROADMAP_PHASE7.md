@@ -161,11 +161,23 @@
 11. ~~Ausführlichere Antworten~~ → System-Prompt erweitert ✅
 12. ~~Timeout erhöhen~~ → AIOHTTP_CLIENT_TIMEOUT=900 ✅
 
-### Nächste Session (Phase 8b – Autonomie)
-10. **Whisper-Integration** → Audio-Upload → Transkription → Protokoll (lokal auf GPU)
-11. **Langzeit-Gedächtnis** → Persistenter Notiz-Speicher pro Mandant/Session
-12. **Multi-Dokument-Vergleich** → Diff zwischen Versionen, Änderungstracking
-13. **Zusammenfassungs-Modus** → Ganzes Dokument kapitelweise zusammenfassen
+### ✅ Erledigt (Phase 8b – 2026-02-15)
+10. ~~**Multi-Dokument-Vergleich**~~ → `compare_documents` Tool (10. Tool), difflib Paragraph-Diff, Fokus-Filter ✅
+11. ~~**Zusammenfassungs-Modus**~~ → `summarize_document` Tool (11. Tool), Kapitel-Erkennung, per-Kapitel LLM-Summary, Executive Summary ✅
+12. ~~**Planner Summary-Routing**~~ → Summary-Keywords erkennen → automatisch `summarize_document` statt search+read ✅
+13. ~~**pdf_onepager.py**~~ → Standalone CLI Map-Reduce Zusammenfassung (Classify → Chunk → MAP Facts → REDUCE One-Pager) ✅
+    - 3-Tier PDF-Extraktion (PyMuPDF → pdfplumber → pypdf)
+    - Robustes JSON-Parsing (4 Strategien für LLM-Output)
+    - Doc-Type-spezifische Templates (technical vs contractual)
+    - Anti-Halluzinations-Regeln (keine erfundenen Empfehlungen)
+    - Output: Markdown, Plain, **DOCX** (formatiertes Word mit Überschriften, Bullets, Metadaten-Footer)
+14. **TFK18 Re-Indexierung** → 48.545 Docs in `rag_tfk18_v1`, PDF-Nachextraktion läuft
+
+### Nächste Session (Phase 8c – Autonomie)
+15. **Admin Cloud-Toggles** → Sicherheitsstufen für Cloud-KI-Features ein/ausschaltbar im Admin-Panel
+16. **Map-Reduce in Agent integrieren** → `summarize_document` Executor durch Map-Reduce-Pattern ersetzen (wie pdf_onepager.py)
+17. **Whisper-Integration** → Audio-Upload → Transkription → Protokoll (lokal auf GPU)
+18. **Batch-Summarizer** → pdf_onepager.py auf ganzen Ordner anwenden (Phase 8 Document Intelligence)
 
 ### Langfristig (Phase 9 – Produktionsreife)
 14. Monitoring & strukturiertes Logging (JSON, Request-Tracing)
@@ -214,10 +226,24 @@ Möglichkeiten:
 - **Report-Generator**: Automatische Statusberichte über mehrere Dokumente/Themen
 - **Benachrichtigungen**: "Neues Dokument indexiert das zu deiner letzten Frage passt"
 
+### Stufe 3.5: Hybrid Intelligence (Lokal + Cloud)
+> *"Ich hole mir Rat beim grossen Modell — aber deine Daten bleiben hier"*
+- **Self-Introduction Protocol**: Lokaler Agent beschreibt sich dem Cloud-Modell (Hardware, Tools, Constraints, Regeln)
+- **Execution Plan vom Cloud-Modell**: Für komplexe Tasks (Zusammenfassungen, Reports) generiert das Cloud-Modell optimale Vorgaben und Qualitätskriterien
+- **Statistik-basierte QA**: Nur Metadaten an Cloud (Wortanzahl, Kapitelstruktur, Entitäten-Liste) — keine Dokumentinhalte
+- **Iterativer Feedback-Loop**: Cloud bewertet Struktur/Statistik, lokales Modell verbessert, bis Freigabe
+- **Regelwerk**: Feste Grenzen (was darf nie an Cloud), verhandelbare Grenzen (Rückfrage an User für Tool-Installation etc.)
+- **Anwendung auf**: Zusammenfassungs-Modus (3.8), Dokument-Vergleich (3.7), Auto-Reports (3.9)
+- **Pragmatischer Einstieg**: Stufe A = ein API-Call für Execution Plan, danach alles lokal
+- **Admin-Toggle**: Alle Cloud-Features müssen im Admin-Panel ein/ausschaltbar sein (Sicherheitsstufen)
+- **Unkritische Daten an Cloud**: Scripts (Code), Statistiken, Kapitelüberschriften, Entitäten-Listen — KEIN Dokumentinhalt
+- **Script-Review durch Cloud**: Cloud-Modell kann Scripts schreiben/kontrollieren (Code = nicht vertraulich)
+
 ### Stufe 4: Autonomer Projektassistent
 > *"Ich überwache, analysiere und handle proaktiv"*
 - **Scheduled Tasks**: Regelmässige Reports, Änderungs-Monitoring
-- **Multi-Agent-Architektur**: Spezialisierte Sub-Agenten (Recherche, Analyse, Redaktion)
+- **Multi-Agent-Architektur**: Spezialisierte Sub-Agenten (Recherche, Analyse, Redaktion) + Cloud als Orchestrator
 - **Workflow-Automation**: Ketten von Aktionen (Index → Analyse → Report → Versand)
 - **Versionierte Wissensbasis**: Änderungshistorie, Rollback, Diff
 - **API-Schnittstelle**: Externe Systeme können den Agent ansprechen (Webhook, REST)
+- **Cloud-Eskalation**: Bei Unsicherheit automatisch Cloud-Modell konsultieren (mit User-Approval)
