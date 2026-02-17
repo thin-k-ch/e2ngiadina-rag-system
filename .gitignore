@@ -1,4 +1,7 @@
 # --- SENSITIVE DATA - NEVER COMMIT ---
+# Batch pipeline runs (large output, logs)
+runs/
+
 # Tools and binaries
 tools/
 !tools/.gitkeep
