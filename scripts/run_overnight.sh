@@ -41,7 +41,26 @@ sleep 5
 
 mkdir -p "$RUN_DIR"
 
-nohup python3 scripts/batch_report.py \
+# Prüfe ob bereits eine Instanz läuft
+if pgrep -f "batch_report.py.*--es-index" > /dev/null 2>&1; then
+    echo "⚠️  batch_report.py läuft bereits:"
+    pgrep -af "batch_report.py.*--es-index"
+    echo ""
+    echo "Abbrechen? Ctrl+C. Oder bestehende Instanz stoppen mit:"
+    echo "  pkill -f 'batch_report.py.*--es-index'"
+    exit 1
+fi
+
+LOGFILE="$RUN_DIR/overnight_$(date +%Y%m%d_%H%M%S).log"
+
+echo ""
+echo "Log wird geschrieben nach: $LOGFILE"
+echo "Ctrl+C stoppt die Pipeline."
+echo "============================================================"
+echo ""
+
+# Vordergrund: live Output + Log-Datei (tee schreibt beides)
+python3 scripts/batch_report.py \
     --model "$MODEL" \
     --es-index "$ES_INDEX" \
     --max-candidates "$MAX_CANDIDATES" \
@@ -50,15 +69,9 @@ nohup python3 scripts/batch_report.py \
     --max-findings 150 \
     --reduce-batch-size 40 \
     --log-level INFO \
-    > "$RUN_DIR/overnight_$(date +%Y%m%d_%H%M%S).log" 2>&1 &
+    2>&1 | tee "$LOGFILE"
 
-PID=$!
 echo ""
-echo "Pipeline gestartet (PID: $PID)"
-echo "Log verfolgen mit:"
-echo "  tail -f $RUN_DIR/overnight_*.log"
-echo ""
-echo "Status prüfen:"
-echo "  ps aux | grep batch_report"
-echo ""
-echo "Bei Abbruch: kill $PID"
+echo "============================================================"
+echo " Pipeline beendet. Log: $LOGFILE"
+echo "============================================================"
