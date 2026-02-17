@@ -863,6 +863,20 @@ def run_batch(
             _log(f"     ❌ {os.path.basename(r.pdf_path)}: {r.error}")
     _log(f"{'='*60}")
 
+    # Write combined document (all one-pagers in one file, 1 A4 page per PDF)
+    combined_path = os.path.join(out_dir, "_alle_summaries.md")
+    with open(combined_path, "w", encoding="utf-8") as f:
+        f.write(f"<!-- Batch-Zusammenfassung: {len(pdfs)} Dokumente | {time.strftime('%d.%m.%Y %H:%M')} -->\n\n")
+        for r in results:
+            if r.success and r.output_path and os.path.exists(r.output_path):
+                try:
+                    content = open(r.output_path, "r", encoding="utf-8").read()
+                    f.write(content.strip() + "\n\n")
+                    f.write("---\n<!-- page-break -->\n\n")
+                except Exception:
+                    pass
+    _log(f"   Kombiniert: {combined_path} ({len([r for r in results if r.success])} Seiten)")
+
     # Write batch report
     report_path = os.path.join(out_dir, "_batch_report.md")
     with open(report_path, "w", encoding="utf-8") as f:
