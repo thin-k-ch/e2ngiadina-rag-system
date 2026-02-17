@@ -5,9 +5,10 @@ Creates: TFK18/volumes/esdata, chroma, manifest
 """
 import os
 import sys
+import json
 import hashlib
+import time
 import requests
-from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 
 # Paths relative to TFK18 root
@@ -16,7 +17,7 @@ TFK18_VOLUMES = os.path.join(TFK18_ROOT, "volumes")
 TFK18_DATA = TFK18_ROOT  # Data files directly in TFK18/
 
 ES_URL = os.getenv("ES_URL", "http://localhost:9200")
-ES_INDEX = "rag_files_tfk18_v1"  # Separate index name
+ES_INDEX = "rag_tfk18_v1"  # Must match tenants/tfk18.yaml es_index
 CHROMA_PATH = os.path.join(TFK18_VOLUMES, "chroma")
 MANIFEST_PATH = os.path.join(TFK18_VOLUMES, "manifest", "manifest.sqlite3")
 
@@ -127,15 +128,30 @@ def es_create_index():
     except:
         pass
     
-    # Create index with mapping
+    # Create index with mapping matching rag_files_v1 structure (nested fields)
     mapping = {
         "mappings": {
             "properties": {
-                "content": {"type": "text", "analyzer": "standard"},
-                "file.filename": {"type": "keyword"},
-                "file.extension": {"type": "keyword"},
-                "path.virtual": {"type": "keyword"},
-                "file.hash": {"type": "keyword"},
+                "content": {"type": "text"},
+                "path": {
+                    "properties": {
+                        "virtual": {
+                            "type": "keyword",
+                            "fields": {
+                                "fulltext": {"type": "text"}
+                            }
+                        }
+                    }
+                },
+                "file": {
+                    "properties": {
+                        "filename": {"type": "keyword", "store": True},
+                        "extension": {"type": "keyword"},
+                        "content_type": {"type": "keyword"},
+                        "filesize": {"type": "long"},
+                        "checksum": {"type": "keyword"}
+                    }
+                },
                 "indexed_at": {"type": "date"}
             }
         }
@@ -185,58 +201,40 @@ def batch_encode(embedder, chunks: List[str]) -> List[List[float]]:
     embeddings = embedder.encode(chunks, show_progress_bar=False, convert_to_numpy=True)
     return embeddings.tolist()
 
+INDEXABLE_EXTS = {'.pdf', '.docx', '.doc', '.eml', '.msg', '.txt', '.md', '.csv',
+                  '.xlsx', '.xls', '.pptx', '.ppt', '.html', '.xml', '.json'}
+
 def main():
+    
     print("=" * 60)
-    print("TFK18 → Self-Contained Index Builder")
+    print("TFK18 → Elasticsearch Index Builder")
     print("=" * 60)
     print(f"Data: {TFK18_DATA}")
-    print(f"Volumes: {TFK18_VOLUMES}")
     print(f"ES Index: {ES_INDEX}")
-    print(f"Chroma: {CHROMA_PATH}")
+    print(f"ES URL: {ES_URL}")
     print("=" * 60)
     
-    # Setup imports
-    sys.path.insert(0, '/media/felix/RAG/AGENTIC/venv/lib/python3.12/site-packages')
-    import chromadb
-    from sentence_transformers import SentenceTransformer
-    import json
-    
-    # Scan files
+    # Scan files (only indexable types)
     print("\n🔍 Scanning files...")
-    files = scan_files(TFK18_DATA)
-    # Exclude volumes directory
-    files = [f for f in files if not f.startswith(TFK18_VOLUMES)]
-    print(f"📁 Found {len(files):,} files")
+    all_files = scan_files(TFK18_DATA)
+    all_files = [f for f in all_files if not f.startswith(TFK18_VOLUMES)]
+    files = [f for f in all_files if os.path.splitext(f)[1].lower() in INDEXABLE_EXTS]
+    print(f"📁 Found {len(all_files):,} total files, {len(files):,} indexable")
     
     if not files:
-        print("❌ No files found!")
+        print("❌ No indexable files found!")
         return
     
     # Setup ES
     es_create_index()
     
-    # Setup Chroma
-    client = chromadb.PersistentClient(CHROMA_PATH)
-    try:
-        client.delete_collection("documents")
-        print("🗑️  Deleted old Chroma collection")
-    except:
-        pass
-    
-    col = client.create_collection("documents")
-    print(f"✅ Created Chroma collection: documents")
-    
-    # Load embedder
-    print(f"🔄 Loading embedder: {EMBED_MODEL}")
-    embedder = SentenceTransformer(EMBED_MODEL)
-    
-    # Process files
+    # Process files (ES only – Chroma can be added later)
     print(f"\n🚀 Processing {len(files):,} files...")
     es_docs = []
-    chroma_batches = []
     processed = 0
+    skipped = 0
     es_indexed = 0
-    chroma_chunks = 0
+    start_time = time.time()
     
     for filepath in files:
         rel_path = os.path.relpath(filepath, TFK18_DATA)
@@ -250,105 +248,48 @@ def main():
         
         file_hash = get_file_hash(filepath)
         
-        # ES document
+        # ES document (nested structure matching rag_files_v1)
         es_doc = {
             "content": content,
-            "file.filename": filename,
-            "file.extension": ext,
-            "path.virtual": rel_path,
-            "file.hash": file_hash,
-            "indexed_at": None  # Will be set by ES
+            "file": {
+                "filename": filename,
+                "extension": ext.lstrip("."),
+                "filesize": os.path.getsize(filepath),
+                "checksum": file_hash,
+            },
+            "path": {
+                "virtual": "/" + rel_path,
+            },
         }
         es_docs.append(es_doc)
         
-        # Chroma chunks
-        chunks = chunk_text(content)
-        for i, chunk in enumerate(chunks):
-            doc_id = stable_id(rel_path, i)
-            chroma_batches.append({
-                "id": doc_id,
-                "text": chunk,
-                "meta": {
-                    "path": rel_path,
-                    "filename": filename,
-                    "chunk_index": i,
-                    "extension": ext
-                }
-            })
-        
         processed += 1
+        if processed % 200 == 0:
+            elapsed = time.time() - start_time
+            rate = processed / elapsed if elapsed > 0 else 0
+            print(f"  ⏳ {processed:,}/{len(files):,} files ({rate:.0f}/s), ES: {es_indexed:,} docs")
         
         # Batch ES index
         if len(es_docs) >= ES_BATCH:
             indexed = es_index_batch(es_docs)
             es_indexed += indexed
             es_docs = []
-            print(f"  ES: {es_indexed:,} docs indexed")
-        
-        # Batch Chroma (accumulate and process in larger batches)
-        if len(chroma_batches) >= EMBED_BATCH * 2:
-            # Encode batch
-            texts = [b["text"] for b in chroma_batches[:EMBED_BATCH]]
-            embeddings = batch_encode(embedder, texts)
-            
-            # Add to Chroma
-            batch = chroma_batches[:EMBED_BATCH]
-            try:
-                col.add(
-                    ids=[b["id"] for b in batch],
-                    documents=[b["text"] for b in batch],
-                    metadatas=[b["meta"] for b in batch],
-                    embeddings=embeddings
-                )
-                chroma_chunks += len(batch)
-            except Exception as e:
-                print(f"⚠️ Chroma error: {e}")
-            
-            chroma_batches = chroma_batches[EMBED_BATCH:]
-            print(f"  Chroma: {chroma_chunks:,} chunks indexed, {processed:,} files processed")
     
     # Final ES batch
     if es_docs:
         indexed = es_index_batch(es_docs)
         es_indexed += indexed
     
-    # Final Chroma batches
-    while chroma_batches:
-        batch_size = min(EMBED_BATCH, len(chroma_batches))
-        batch = chroma_batches[:batch_size]
-        texts = [b["text"] for b in batch]
-        embeddings = batch_encode(embedder, texts)
-        
-        try:
-            col.add(
-                ids=[b["id"] for b in batch],
-                documents=[b["text"] for b in batch],
-                metadatas=[b["meta"] for b in batch],
-                embeddings=embeddings
-            )
-            chroma_chunks += len(batch)
-        except Exception as e:
-            print(f"⚠️ Chroma error: {e}")
-        
-        chroma_batches = chroma_batches[batch_size:]
-    
-    final_chroma_count = col.count()
+    elapsed = time.time() - start_time
     
     print("\n" + "=" * 60)
-    print("✅ TFK18 Index Complete:")
-    print(f"   Files processed: {processed:,}")
-    print(f"   ES docs: {es_indexed:,}")
-    print(f"   Chroma chunks: {chroma_chunks:,} (count: {final_chroma_count:,})")
+    print("✅ TFK18 ES Index Complete:")
+    print(f"   Files scanned: {len(files):,}")
+    print(f"   Files with text: {processed:,} (skipped {len(files) - processed:,})")
+    print(f"   ES docs indexed: {es_indexed:,}")
     print(f"   ES Index: {ES_INDEX}")
-    print(f"   Chroma Path: {CHROMA_PATH}")
+    print(f"   Duration: {elapsed:.0f}s ({elapsed/60:.1f}min)")
     print("=" * 60)
-    print("\nTo switch to TFK18:")
-    print("1. docker-compose down")
-    print("2. mv /media/felix/RAG/1 /media/felix/RAG/1_backup")
-    print("3. mv /media/felix/RAG/TFK18 /media/felix/RAG/1")
-    print("4. docker-compose up -d")
-    print("\nTo switch back:")
-    print("Reverse the above steps.")
 
 if __name__ == "__main__":
     main()

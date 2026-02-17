@@ -1186,6 +1186,27 @@ class ReactAgent:
             print(f"🧠 Model split: strategy={self.model_strategy}, answer={self.model_answer}")
         if self._use_prompt_tools_answer:
             print(f"🧠 Model {self.model_answer}: using prompt-based tool calling (no native tools)")
+        # Cloud & Security toggles (read fresh from config each request)
+        self._web_search_enabled = bool(cfg.get("web_search_enabled", True))
+        self._execute_python_enabled = bool(cfg.get("execute_python_enabled", True))
+        self._reranker_enabled = bool(cfg.get("reranker_enabled", True))
+        # Build filtered tool list
+        self._active_tools = self._get_active_tools()
+        disabled = [t for t in ["web_search", "execute_python"] if t not in {
+            tool["function"]["name"] for tool in self._active_tools}]
+        if disabled:
+            print(f"🔒 Deaktivierte Tools: {', '.join(disabled)}")
+    
+    def _get_active_tools(self) -> list:
+        """Return TOOLS list filtered by runtime config toggles."""
+        disabled_names = set()
+        if not self._web_search_enabled:
+            disabled_names.add("web_search")
+        if not self._execute_python_enabled:
+            disabled_names.add("execute_python")
+        if not disabled_names:
+            return TOOLS
+        return [t for t in TOOLS if t["function"]["name"] not in disabled_names]
     
     async def _get_search_plan(self, query: str, chat_history: list = None) -> dict:
         """Ask cloud model to generate a structured search plan. No doc content sent."""
@@ -1626,9 +1647,16 @@ WICHTIG für answer_hint:
                     yield {"type": "phase", "content": self._phase_label(tool_name, tool_args)}
                     yield {"type": "tool_call", "name": tool_name, "args": tool_args}
                     
-                    # Execute tool
-                    executor = TOOL_EXECUTORS.get(tool_name)
-                    if executor:
+                    # Execute tool (check if disabled by runtime config)
+                    _disabled_tools = set()
+                    if not self._web_search_enabled:
+                        _disabled_tools.add("web_search")
+                    if not self._execute_python_enabled:
+                        _disabled_tools.add("execute_python")
+                    if tool_name in _disabled_tools:
+                        result = f"Tool '{tool_name}' ist vom Administrator deaktiviert."
+                        print(f"🔒 Blocked disabled tool: {tool_name}")
+                    elif (executor := TOOL_EXECUTORS.get(tool_name)):
                         try:
                             # Pass query hint for smart truncation in read_document
                             if tool_name == "read_document" and "query_hint" not in tool_args:
@@ -1823,7 +1851,7 @@ WICHTIG für answer_hint:
     def _build_prompt_tools_instruction(self) -> str:
         """Build tool-calling instructions for models that don't support native tools."""
         tool_descs = []
-        for t in TOOLS:
+        for t in self._active_tools:
             func = t["function"]
             params = func.get("parameters", {}).get("properties", {})
             param_strs = ['"' + k + '": "<' + v.get("description", k) + '>"' for k, v in params.items()]
@@ -1900,9 +1928,9 @@ WICHTIG für answer_hint:
         
         sanitized = self._sanitize_messages_for_online(messages)
         
-        # Convert TOOLS to OpenAI format
+        # Convert active tools to OpenAI format (filtered by runtime config)
         openai_tools = []
-        for tool in TOOLS:
+        for tool in self._active_tools:
             openai_tools.append({
                 "type": "function",
                 "function": tool["function"]
@@ -1983,7 +2011,7 @@ WICHTIG für answer_hint:
         payload = {
             "model": model,
             "messages": messages,
-            "tools": TOOLS,
+            "tools": self._active_tools,
             "stream": False,
             "options": {
                 "num_ctx": num_ctx,

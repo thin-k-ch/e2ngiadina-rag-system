@@ -23,6 +23,10 @@ class RuntimeConfig:
         "online_model_name": "gpt-4o-mini",  # Fast + cheap for routing
         "online_strategy_mode": "routing",  # "routing" = simple tool choice, "planner" = full search plan
         "agent_mode_enabled": True,  # True = ReAct Agent, False = direct LLM (no tools)
+        # Cloud & Security toggles
+        "web_search_enabled": True,  # Allow web_search tool (SearXNG/Brave/Serper)
+        "execute_python_enabled": True,  # Allow execute_python tool (sandbox)
+        "reranker_enabled": True,  # Cross-encoder reranking after hybrid search
     }
 
     def __init__(self, path: str = None):

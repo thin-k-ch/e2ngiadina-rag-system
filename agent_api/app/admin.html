@@ -203,6 +203,66 @@
         <button class="btn btn-primary mt-3" onclick="saveConfig()">💾 Speichern</button>
       </div>
 
+      <!-- Cloud & Security Toggles -->
+      <div class="card md:col-span-2">
+        <div class="section-title">🔒 Cloud & Sicherheit</div>
+        <p class="text-sm text-slate-400 mb-4">Einzelne Features ein-/ausschalten. Änderungen gelten sofort für neue Anfragen (kein Neustart nötig).</p>
+        <div class="space-y-4">
+          <!-- Web Search Toggle -->
+          <div class="flex items-center justify-between p-3 rounded-lg bg-slate-800 border border-slate-600">
+            <div class="flex items-center gap-3">
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" id="cfg-web-search" class="sr-only peer" onchange="saveConfig()">
+                <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+              </label>
+              <div>
+                <span class="text-sm font-semibold text-white">🌐 Web-Suche</span>
+                <p class="text-xs text-slate-400 mt-0.5">SearXNG / Brave / Serper — Internet-Suche für externes Wissen</p>
+              </div>
+            </div>
+            <span class="text-xs px-2 py-1 rounded bg-slate-700 text-slate-400" id="web-search-badge">lokal (SearXNG)</span>
+          </div>
+          <!-- Execute Python Toggle -->
+          <div class="flex items-center justify-between p-3 rounded-lg bg-slate-800 border border-slate-600">
+            <div class="flex items-center gap-3">
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" id="cfg-exec-python" class="sr-only peer" onchange="saveConfig()">
+                <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+              </label>
+              <div>
+                <span class="text-sm font-semibold text-white">🐍 Python-Ausführung</span>
+                <p class="text-xs text-slate-400 mt-0.5">Sandbox (PyRunner) — Datenanalyse, Dateisystem-Abfragen, Berechnungen</p>
+              </div>
+            </div>
+            <span class="text-xs px-2 py-1 rounded bg-emerald-900 text-emerald-300">lokal (Sandbox)</span>
+          </div>
+          <!-- Reranker Toggle -->
+          <div class="flex items-center justify-between p-3 rounded-lg bg-slate-800 border border-slate-600">
+            <div class="flex items-center gap-3">
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" id="cfg-reranker" class="sr-only peer" onchange="saveConfig()">
+                <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+              </label>
+              <div>
+                <span class="text-sm font-semibold text-white">🎯 Cross-Encoder Reranking</span>
+                <p class="text-xs text-slate-400 mt-0.5">Semantisches Reranking der Suchergebnisse (~90 MB Modell, CPU/GPU)</p>
+              </div>
+            </div>
+            <span class="text-xs px-2 py-1 rounded bg-emerald-900 text-emerald-300">lokal (CPU)</span>
+          </div>
+        </div>
+        <!-- Security Level Indicator -->
+        <div class="mt-4 p-3 rounded-lg border" id="security-level-box">
+          <div class="flex items-center gap-2">
+            <span class="text-lg" id="security-level-icon">🟢</span>
+            <div>
+              <span class="text-sm font-bold" id="security-level-label">Sicherheitsstufe: Lokal</span>
+              <p class="text-xs text-slate-400" id="security-level-desc">Alle Daten bleiben auf diesem Server.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Performance -->
       <div class="card">
         <div class="section-title">⚡ Performance</div>
@@ -377,6 +437,11 @@ async function loadDashboard() {
     document.getElementById('cfg-mode-routing').checked = (mode === 'routing');
     document.getElementById('cfg-mode-planner').checked = (mode === 'planner');
     toggleOnlineFields();
+    // Cloud & Security toggles
+    document.getElementById('cfg-web-search').checked = config.web_search_enabled !== false;
+    document.getElementById('cfg-exec-python').checked = config.execute_python_enabled !== false;
+    document.getElementById('cfg-reranker').checked = config.reranker_enabled !== false;
+    updateSecurityLevel();
   }
 
   // Load memories for active tenant
@@ -449,6 +514,9 @@ async function saveConfig() {
     online_api_key: document.getElementById('cfg-online-key').value,
     online_model_name: document.getElementById('cfg-online-model').value || 'gpt-4o-mini',
     online_strategy_mode: document.querySelector('input[name="strategy-mode"]:checked')?.value || 'routing',
+    web_search_enabled: document.getElementById('cfg-web-search').checked,
+    execute_python_enabled: document.getElementById('cfg-exec-python').checked,
+    reranker_enabled: document.getElementById('cfg-reranker').checked,
   };
   const r = await api('/admin/api/config', {
     method: 'POST',
@@ -464,8 +532,45 @@ async function saveConfig() {
       info.textContent = data.strategy_model ? `Aktuell: ${data.strategy_model}` : 'Kein Hilfsmodell (Hauptmodell für alles)';
     }
     toggleOnlineFields();
+    updateSecurityLevel();
   } else {
     toast('Fehler beim Speichern', false);
+  }
+}
+
+// --- Update Security Level Indicator ---
+function updateSecurityLevel() {
+  const online = document.getElementById('cfg-online-enabled').checked;
+  const webSearch = document.getElementById('cfg-web-search').checked;
+  const execPython = document.getElementById('cfg-exec-python').checked;
+  const reranker = document.getElementById('cfg-reranker').checked;
+  
+  const box = document.getElementById('security-level-box');
+  const icon = document.getElementById('security-level-icon');
+  const label = document.getElementById('security-level-label');
+  const desc = document.getElementById('security-level-desc');
+  
+  if (online) {
+    // Cloud active
+    icon.textContent = '🟡';
+    label.textContent = 'Sicherheitsstufe: Cloud-Hybrid';
+    label.className = 'text-sm font-bold text-amber-400';
+    desc.textContent = 'Online-Modell aktiv — User-Fragen und Tool-Definitionen gehen an die Cloud. Keine Dokumentinhalte.';
+    box.className = 'mt-4 p-3 rounded-lg border border-amber-600 bg-amber-950/30';
+  } else if (!webSearch && !execPython && !reranker) {
+    // Everything off
+    icon.textContent = '🔴';
+    label.textContent = 'Sicherheitsstufe: Minimal';
+    label.className = 'text-sm font-bold text-red-400';
+    desc.textContent = 'Alle erweiterten Features deaktiviert. Nur Dokumentensuche + LLM-Antwort.';
+    box.className = 'mt-4 p-3 rounded-lg border border-red-600 bg-red-950/30';
+  } else {
+    // All local
+    icon.textContent = '🟢';
+    label.textContent = 'Sicherheitsstufe: Lokal';
+    label.className = 'text-sm font-bold text-emerald-400';
+    desc.textContent = 'Alle Daten bleiben auf diesem Server. Keine externen API-Aufrufe.';
+    box.className = 'mt-4 p-3 rounded-lg border border-emerald-600 bg-emerald-950/30';
   }
 }
 

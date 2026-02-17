@@ -49,6 +49,13 @@ def rerank(query: str, hits: List[Dict[str, Any]], top_n: int = None) -> List[Di
     Returns:
         Reranked list of hits with 'rerank_score' added
     """
+    # Check runtime config toggle (takes precedence over env var)
+    try:
+        from .runtime_config import get_runtime_config
+        if not get_runtime_config().get("reranker_enabled", True):
+            return hits
+    except Exception:
+        pass
     if not RERANKER_ENABLED or not hits:
         return hits
     
