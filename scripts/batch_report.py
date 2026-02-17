@@ -60,7 +60,7 @@ class Config:
 
     # Ollama
     ollama_base: str = "http://localhost:11434"
-    ollama_model: str = "gpt-oss:latest"
+    ollama_model: str = "glm-4.7-flash:latest"
     ollama_timeout_s: int = 600
 
     # Elasticsearch
@@ -71,6 +71,12 @@ class Config:
     max_candidates: int = 3000
     min_chars: int = 200
     max_input_chars: int = 6000
+
+    # File extension filter (skip noise: images, measurement data, CAD, binaries)
+    include_extensions: tuple = (
+        "pdf", "eml", "docx", "doc", "xlsx", "xls", "txt", "md",
+        "msg", "pptx", "ppt", "csv", "html", "htm", "rtf",
+    )
 
     # MAP phase
     map_retry: int = 2
@@ -251,30 +257,49 @@ def extract_json_from_text(text: str) -> Optional[Any]:
 # ---------------------------------------------------------------------------
 
 DEFAULT_TOPICS = [
-    {"id": "lessons_technical", "label": "Technische Lessons Learned",
-     "queries": ["technische Probleme Lessons Learned", "Fehler Ursache Lösung",
-                 "technische Herausforderung Erkenntnis", "System Ausfall Störung Root Cause"]},
-    {"id": "lessons_process", "label": "Prozess Lessons Learned",
-     "queries": ["Prozess Verbesserung Lessons Learned", "Ablauf Optimierung",
-                 "Projektmanagement Erkenntnis", "Kommunikation Koordination Problem"]},
-    {"id": "decisions", "label": "Wichtige Entscheidungen",
-     "queries": ["Entscheidung Beschluss Genehmigung", "Strategieänderung Richtungswechsel",
-                 "Freigabe Meilenstein Go-Decision"]},
-    {"id": "risks", "label": "Risiken und Massnahmen",
-     "queries": ["Risiko Massnahme Mitigation", "Verzögerung Terminrisiko",
-                 "Kostenüberschreitung Budget Risiko"]},
-    {"id": "recommendations", "label": "Empfehlungen",
-     "queries": ["Empfehlung Vorschlag Verbesserung", "sollte künftig vermieden",
-                 "Best Practice Standardisierung"]},
-    {"id": "incidents", "label": "Vorfälle und Incidents",
-     "queries": ["Incident Störung Vorfall", "Ausfall Defekt Fehlfunktion",
-                 "Sicherheitsvorfall Eskalation"]},
-    {"id": "milestones", "label": "Meilensteine und Ergebnisse",
-     "queries": ["Meilenstein Abnahme Erfolg", "FAT SAT Inbetriebnahme",
-                 "Fertigstellung Übergabe Lieferung"]},
-    {"id": "costs", "label": "Kosten und Finanzen",
-     "queries": ["Kosten Budget Nachtrag", "Vergütung Aufwand Einsparung",
-                 "Pönale Konventionalstrafe Mehrkosten"]},
+    # --- Aligned to Schlussbericht PROFUMO Findings ---
+    {"id": "abnahme_qualitaet", "label": "Abnahmefähigkeit & Qualitätsgates",
+     "queries": ["Abnahme Qualität Gate Kriterien", "bereit zur Abnahme Freigabe",
+                 "Abnahmeprotokoll Lieferobjekt Dossier", "First-Time-Right Nacharbeit Rework",
+                 "Definition of Done Abnahmekriterien", "Qualitätsmangel Zurückweisung"]},
+    {"id": "traceability_nachweis", "label": "Nachweis-Disziplin & Traceability",
+     "queries": ["Traceability Nachvollziehbarkeit Rohdaten", "Messbericht Auswertung Korrektur",
+                 "Datenbereinigung Neuauswertung zurückgewiesen", "Dokumentation unvollständig fehlend",
+                 "Nachweisführung Messung Protokoll"]},
+    {"id": "change_control_freeze", "label": "Design-Freeze & Change Control",
+     "queries": ["Design Freeze Änderung Change", "Nachmessung Anpassung ungeplant",
+                 "Change Control Board Änderungsmanagement", "Rework Spirale Korrekturschleifen",
+                 "Änderungsindex Konfiguration Versionsstand"]},
+    {"id": "schnittstellen_interfaces", "label": "Schnittstellenverantwortung & Interfaces",
+     "queries": ["Schnittstelle Verantwortung Ownership", "Handover Zone Koordination",
+                 "Interface Register RACI Zuständigkeit", "Systemübergang Integration Abstimmung"]},
+    {"id": "externe_abhaengigkeiten", "label": "Externe Abhängigkeiten (SBB/BAV)",
+     "queries": ["SBB Messzug Abhängigkeit Verfügbarkeit", "BAV Zulassung Genehmigung",
+                 "Abnahmegeschwindigkeit Vmax externe Instanz", "Fallback Szenario Alternative",
+                 "Lokführer Bewilligung EVU"]},
+    {"id": "lbt_krise_technik", "label": "LBT-Krise & HF-Technik",
+     "queries": ["Signalschwund Interferenz Leckkabel", "LBT Lötschberg Basistunnel Krise",
+                 "B-Kabel A-Kabel Wandabstand Reflexion", "PIM Passive Intermodulation Messung",
+                 "GSM-R Frequenz Dämpfung Abdeckung", "Enotrac Simulation Wellenausbreitung"]},
+    {"id": "kosten_finanzen", "label": "Finanzielle Eskalation & Budget",
+     "queries": ["Kredit Aufstockung Nachkredit Budget", "Kostenüberschreitung Endkostenprognose",
+                 "Mehrkosten Zusatzaufwand Nachtrag", "Vergabe freihändig Krisenintervention",
+                 "Kostentreiber Rework Messfahrten ungeplant"]},
+    {"id": "lieferanten_commscope", "label": "Lieferanten & CommScope",
+     "queries": ["CommScope Lieferant Mangel Kriterium", "Lieferantensteuerung Vertrag Pflicht",
+                 "Muss-Kriterium nicht erfüllt Lieferant", "Gewährleistung Mängelrüge Nachbesserung"]},
+    {"id": "organisation_governance", "label": "Organisation & Governance",
+     "queries": ["Eskalation Geschäftsleitung Management", "Governance Steuerung Projektorganisation",
+                 "Kernteam Kommunikation Koordination", "PMO Projektmanagement Standard"]},
+    {"id": "entscheidungen_timeline", "label": "Schlüsselentscheidungen & Timeline",
+     "queries": ["Entscheidung Beschluss Genehmigung Meilenstein", "Wendepunkt Eskalation kritisch",
+                 "Timeline Chronologie Phasenübergang", "Statusbericht Fortschritt Prognose"]},
+    {"id": "was_gut_lief", "label": "Was gut funktioniert hat",
+     "queries": ["Erfolg wirksam bewährt funktioniert", "Best Practice Standardisierung Vorbild",
+                 "Krisenhebel Massnahme wirksam Lösung", "Verbesserung gelungen Ergebnis positiv"]},
+    {"id": "empfehlungen_zukunft", "label": "Empfehlungen & Lessons Learned",
+     "queries": ["Empfehlung Verbesserung künftig vermeiden", "Lessons Learned Erkenntnis",
+                 "sollte muss zukünftig verbessert", "Standardisierung Institutionalisierung Prozess"]},
 ]
 
 
@@ -296,13 +321,21 @@ def load_topics(path: Optional[str]) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def search_es(cfg: Config, query: str, size: int = 100) -> List[Dict[str, Any]]:
-    """BM25 search against ES index. Returns list of {doc_id, path, content, score}."""
+    """BM25 search against ES index. Returns list of {doc_id, path, content, score}.
+    Filters by file extension to skip noise (images, measurements, CAD)."""
     url = f"{cfg.es_url}/{cfg.es_index}/_search"
+
+    # Build extension filter: match any of the allowed extensions in the path
+    ext_should = [{"wildcard": {"path.virtual": f"*.{ext}"}} for ext in cfg.include_extensions]
+
     payload = {
         "size": size,
         "query": {
             "bool": {
                 "must": [{"match": {"content": {"query": query, "operator": "or"}}}],
+                "filter": [
+                    {"bool": {"should": ext_should, "minimum_should_match": 1}},
+                ],
             }
         },
         "_source": ["content", "path"],
@@ -649,34 +682,44 @@ Antworte als JSON-Liste."""
 # Phase 4: DRAFT – Generate report suggestions
 # ---------------------------------------------------------------------------
 
-DRAFT_SYSTEM = """Du bist ein Redaktor für Top-Management-Berichte in Schweizer Infrastrukturprojekten.
+DRAFT_SYSTEM = """Du bist ein Senior-Analyst für kritische Infrastruktur-Schlussberichte bei der BLS AG (Schweiz).
+Du reichst einen bestehenden Schlussbericht mit neuen Evidenzien und Findings an.
 Du schreibst prägnant, entscheidungsorientiert, mit klaren Empfehlungen.
-Du nutzt AUSSCHLIESSLICH die Findings als Faktenbasis – erfinde nichts.
+Du nutzt AUSSCHLIESSLICH die extrahierten Findings als Faktenbasis – erfinde nichts.
+Wenn ein Finding den bestehenden Bericht bestätigt, verweise explizit darauf.
+Wenn ein Finding NEU ist (nicht im bestehenden Bericht), markiere es klar als [NEU].
 Sprache: Deutsch. Format: Markdown."""
 
-DRAFT_USER_TEMPLATE = """Erstelle Ergänzungen/Verbesserungen für meinen Schlussbericht.
+DRAFT_USER_TEMPLATE = """Analysiere die folgenden Findings und ergänze meinen bestehenden Schlussbericht.
 
 {outline_section}
 
-Findings (Faktenbasis – {n} Stück):
+Findings aus der Dokumentenanalyse ({n} Stück):
 {findings_json}
 
 Erstelle folgende Abschnitte (jeweils als Markdown):
 
-## Executive Summary
-Max 12 Bulletpoints – die wichtigsten Erkenntnisse und Empfehlungen.
+## 1. Neue Evidenzien für bestehende Befunde
+Für jedes der 14 PROFUMO-Findings im bestehenden Bericht: Welche neuen Belege/Zitate aus den Findings stützen oder widersprechen ihm?
+Format: Finding-Nr → Neue Evidenz (Dokumentname, Zitat)
 
-## Lessons Learned
-15-25 Bulletpoints, gruppiert nach Kategorie (Tech, Process, Org, Cost, etc.)
+## 2. Neue Findings [NEU]
+Findings die im bestehenden Bericht NICHT vorkommen. Gruppiert nach Kategorie.
+Pro Finding: Titel, Statement, Evidenz (Dokument + Zitat), Empfehlung.
+
+## 3. Ergänzte Lessons Learned
+15-25 Bulletpoints, gruppiert nach Kategorie (Tech, Process, Org, Cost)
 Pro Lesson: Was ist passiert → Was haben wir gelernt → Was empfehlen wir
+Markiere [NEU] wenn nicht im bestehenden Bericht enthalten.
 
-## Empfehlungen ans Management
+## 4. Ergänzte Empfehlungen ans Management
 10-20 konkrete Massnahmen als Tabelle:
-| # | Empfehlung | Kategorie | Nutzen | Aufwand | Priorität |
+| # | Empfehlung | Kategorie | Nutzen | Aufwand | Priorität | Neu? |
+Markiere mit [NEU] falls nicht im bestehenden Bericht.
 
-## Abschnittsvorschläge
-Für jedes Kapitel des Outlines: 1-3 kurze Absätze mit konkretem Inhalt aus den Findings.
-Verweise auf Evidenz wo möglich (Dokumentname)."""
+## 5. Konkrete Textvorschläge pro Kapitel
+Für jedes Kapitel des Berichts: 1-3 kurze Absätze mit konkretem Inhalt.
+Verweise auf Quell-Dokumente wo immer möglich."""
 
 
 def step_draft(cfg: Config, logger: logging.Logger,
@@ -690,10 +733,27 @@ def step_draft(cfg: Config, logger: logging.Logger,
     findings = read_json(findings_path)
     outline = ""
     if outline_path and os.path.exists(outline_path):
-        outline = open(outline_path, "r", encoding="utf-8").read()
+        if outline_path.lower().endswith(".pdf"):
+            # Extract text from PDF via pdftotext
+            import subprocess
+            try:
+                result = subprocess.run(
+                    ["pdftotext", "-layout", outline_path, "-"],
+                    capture_output=True, text=True, timeout=60
+                )
+                outline = result.stdout
+                logger.info(f"DRAFT: extracted {len(outline):,} chars from PDF outline")
+            except Exception as e:
+                logger.warning(f"DRAFT: pdftotext failed: {e}, treating as text")
+                outline = open(outline_path, "r", encoding="utf-8").read()
+        else:
+            outline = open(outline_path, "r", encoding="utf-8").read()
+    # Truncate outline if too long (keep first ~20K chars to fit in context)
+    if len(outline) > 20000:
+        outline = outline[:20000] + "\n\n[... Rest des Berichts gekürzt ...]\n"
 
-    outline_section = f"Mein Outline / Kapitelstruktur:\n{outline}" if outline else \
-        "Kein Outline vorhanden – erstelle eine Standard-Kapitelstruktur."
+    outline_section = f"Mein bestehender Schlussbericht (Auszug):\n{outline}" if outline else \
+        "Kein bestehender Bericht vorhanden – erstelle eine Standard-Kapitelstruktur."
 
     # If too many findings for one prompt, take top by confidence
     if len(findings) > 80:
@@ -761,7 +821,7 @@ def parse_args():
     )
     ap.add_argument("--run-id", default=None, help="Run-ID (für Resume)")
     ap.add_argument("--out", default="runs", help="Basis-Ausgabeverzeichnis (default: runs/)")
-    ap.add_argument("--model", default="gpt-oss:latest", help="Ollama Modell")
+    ap.add_argument("--model", default="glm-4.7-flash:latest", help="Ollama Modell")
     ap.add_argument("--ollama", default="http://localhost:11434", help="Ollama Base URL")
     ap.add_argument("--es-url", default="http://localhost:9200", help="Elasticsearch URL")
     ap.add_argument("--es-index", default="rag_tfk18_v1", help="ES Index")
