@@ -663,18 +663,248 @@ def _add_formatted_text(paragraph, text: str):
 # Main
 # ---------------------------------------------------------------------------
 
+@dataclass
+class ProcessResult:
+    """Result of processing a single PDF."""
+    pdf_path: str
+    success: bool
+    doc_type: str = ""
+    confidence: float = 0.0
+    audience: str = ""
+    chunks: int = 0
+    extractor: str = ""
+    elapsed: float = 0.0
+    output_path: str = ""
+    error: str = ""
+
+
+def process_single_pdf(
+    pdf_path: str,
+    client: OllamaClient,
+    model: str,
+    audience_arg: str = "auto",
+    output_format: str = "markdown",
+    out_path: str = "",
+    chunk_tokens: int = 1800,
+    overlap_tokens: int = 200,
+) -> ProcessResult:
+    """
+    Process a single PDF through the full Map-Reduce pipeline.
+    Returns a ProcessResult with metadata.
+    """
+    t_start = time.time()
+
+    try:
+        # 1. Extract
+        _log(f"📄 Extrahiere PDF-Text...")
+        text, extractor = extract_pdf_text(pdf_path)
+        n_pages = text.count("\n\n") // 2 or 1
+        _log(f"   → {len(text):,} Zeichen via {extractor} (~{n_pages} Seiten)")
+
+        # 2. Classify
+        doc_type, conf, signals = classify_document(client, model, text)
+        audience = choose_audience(doc_type, audience_arg)
+        _log(f"   Audience: {audience}")
+
+        # 3. Chunk
+        chunks = split_into_chunks(text, target_tokens=chunk_tokens, overlap_tokens=overlap_tokens)
+        _log(f"\n📦 {len(chunks)} Chunks erstellt")
+
+        # 4. MAP
+        _log(f"\n🔬 MAP Phase ({len(chunks)} Chunks):")
+        facts = map_extract_facts(client, model, doc_type, audience, chunks)
+
+        # 5. REDUCE
+        _log(f"\n📝 REDUCE Phase:")
+        filename = os.path.basename(pdf_path)
+        onepager = reduce_onepager(
+            client, model, doc_type, audience, facts,
+            filename=filename, output_format=output_format,
+        )
+
+        # 6. Output
+        elapsed = time.time() - t_start
+        meta = {
+            "pdf": pdf_path,
+            "model": model,
+            "doc_type": doc_type,
+            "confidence": conf,
+            "audience": audience,
+            "chunks": len(chunks),
+            "extractor": extractor,
+            "elapsed": elapsed,
+        }
+
+        actual_out = out_path
+        if output_format == "docx":
+            actual_out = out_path or os.path.splitext(os.path.basename(pdf_path))[0] + "_onepager.docx"
+            _write_docx(onepager, actual_out, meta)
+            _log(f"\n✅ Word-Dokument gespeichert: {actual_out}")
+        else:
+            header = (
+                f"<!-- PDF One-Pager -->\n"
+                f"<!-- PDF: {pdf_path} -->\n"
+                f"<!-- Model: {model} | Type: {doc_type} ({conf:.0%}) | Audience: {audience} -->\n"
+                f"<!-- Chunks: {len(chunks)} | Extractor: {extractor} | Zeit: {elapsed:.0f}s -->\n\n"
+            )
+            output = header + onepager + "\n"
+            if actual_out:
+                with open(actual_out, "w", encoding="utf-8") as f:
+                    f.write(output)
+                _log(f"\n✅ Gespeichert: {actual_out}")
+            else:
+                print(output)
+
+        _log(f"\n=== Fertig in {elapsed:.0f}s ({len(chunks)} Chunks, {doc_type}/{audience}) ===")
+        return ProcessResult(
+            pdf_path=pdf_path, success=True, doc_type=doc_type,
+            confidence=conf, audience=audience, chunks=len(chunks),
+            extractor=extractor, elapsed=elapsed, output_path=actual_out,
+        )
+
+    except Exception as e:
+        elapsed = time.time() - t_start
+        _log(f"\n❌ Fehler bei {pdf_path}: {e}")
+        return ProcessResult(
+            pdf_path=pdf_path, success=False, elapsed=elapsed, error=str(e),
+        )
+
+
+def run_batch(
+    dir_path: str,
+    client: OllamaClient,
+    model: str,
+    audience_arg: str = "auto",
+    output_format: str = "markdown",
+    out_dir: str = "",
+    chunk_tokens: int = 1800,
+    overlap_tokens: int = 200,
+    recursive: bool = False,
+) -> List[ProcessResult]:
+    """
+    Process all PDFs in a directory. Returns list of results.
+    """
+    if not os.path.isdir(dir_path):
+        raise FileNotFoundError(f"Verzeichnis nicht gefunden: {dir_path}")
+
+    # Collect PDFs
+    pdfs = []
+    if recursive:
+        for root, _, files in os.walk(dir_path):
+            for f in sorted(files):
+                if f.lower().endswith(".pdf"):
+                    pdfs.append(os.path.join(root, f))
+    else:
+        pdfs = sorted(
+            os.path.join(dir_path, f) for f in os.listdir(dir_path)
+            if f.lower().endswith(".pdf")
+        )
+
+    if not pdfs:
+        _log(f"⚠️  Keine PDFs gefunden in: {dir_path}")
+        return []
+
+    # Prepare output directory
+    if not out_dir:
+        out_dir = os.path.join(dir_path, "_summaries")
+    os.makedirs(out_dir, exist_ok=True)
+
+    ext = ".docx" if output_format == "docx" else ".md" if output_format == "markdown" else ".txt"
+
+    _log(f"\n{'='*60}")
+    _log(f"📁 BATCH-MODUS: {len(pdfs)} PDFs in {dir_path}")
+    _log(f"   Output: {out_dir}")
+    _log(f"   Format: {output_format} | Modell: {model}")
+    _log(f"{'='*60}\n")
+
+    results: List[ProcessResult] = []
+    t_batch_start = time.time()
+
+    for i, pdf_path in enumerate(pdfs, start=1):
+        pdf_name = os.path.basename(pdf_path)
+        out_name = os.path.splitext(pdf_name)[0] + "_onepager" + ext
+        out_path = os.path.join(out_dir, out_name)
+
+        # Skip if already exists
+        if os.path.exists(out_path):
+            _log(f"\n⏭️  [{i}/{len(pdfs)}] Überspringe (existiert): {pdf_name}")
+            results.append(ProcessResult(
+                pdf_path=pdf_path, success=True, output_path=out_path,
+                doc_type="skipped", elapsed=0,
+            ))
+            continue
+
+        _log(f"\n{'─'*50}")
+        _log(f"📄 [{i}/{len(pdfs)}] {pdf_name}")
+        _log(f"{'─'*50}")
+
+        result = process_single_pdf(
+            pdf_path=pdf_path, client=client, model=model,
+            audience_arg=audience_arg, output_format=output_format,
+            out_path=out_path, chunk_tokens=chunk_tokens,
+            overlap_tokens=overlap_tokens,
+        )
+        results.append(result)
+
+    # Summary report
+    batch_elapsed = time.time() - t_batch_start
+    ok = [r for r in results if r.success]
+    skipped = [r for r in results if r.doc_type == "skipped"]
+    failed = [r for r in results if not r.success]
+
+    _log(f"\n{'='*60}")
+    _log(f"📊 BATCH-ERGEBNIS")
+    _log(f"   Gesamt: {len(pdfs)} PDFs | ✅ {len(ok)} OK | ⏭️ {len(skipped)} übersprungen | ❌ {len(failed)} Fehler")
+    _log(f"   Dauer: {batch_elapsed:.0f}s ({batch_elapsed/60:.1f} min)")
+    _log(f"   Output: {out_dir}")
+    if failed:
+        _log(f"\n   Fehlgeschlagene PDFs:")
+        for r in failed:
+            _log(f"     ❌ {os.path.basename(r.pdf_path)}: {r.error}")
+    _log(f"{'='*60}")
+
+    # Write batch report
+    report_path = os.path.join(out_dir, "_batch_report.md")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(f"# Batch-Zusammenfassung\n\n")
+        f.write(f"- **Verzeichnis**: {dir_path}\n")
+        f.write(f"- **Modell**: {model}\n")
+        f.write(f"- **Datum**: {time.strftime('%d.%m.%Y %H:%M')}\n")
+        f.write(f"- **Gesamt**: {len(pdfs)} PDFs | ✅ {len(ok)} | ⏭️ {len(skipped)} | ❌ {len(failed)}\n")
+        f.write(f"- **Dauer**: {batch_elapsed:.0f}s\n\n")
+        f.write(f"| # | PDF | Status | Typ | Chunks | Dauer |\n")
+        f.write(f"|---|-----|--------|-----|--------|-------|\n")
+        for i, r in enumerate(results, 1):
+            name = os.path.basename(r.pdf_path)[:40]
+            status = "⏭️" if r.doc_type == "skipped" else ("✅" if r.success else "❌")
+            f.write(f"| {i} | {name} | {status} | {r.doc_type} | {r.chunks} | {r.elapsed:.0f}s |\n")
+        if failed:
+            f.write(f"\n## Fehler\n\n")
+            for r in failed:
+                f.write(f"- **{os.path.basename(r.pdf_path)}**: {r.error}\n")
+    _log(f"   Report: {report_path}")
+
+    return results
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="PDF → One-Page A4 Summary via Ollama (Map-Reduce)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Beispiele:
+  # Einzelne PDF:
   python pdf_onepager.py --pdf Werkvertrag.pdf
   python pdf_onepager.py --pdf Pflichtenheft.pdf --model llama4:latest --audience lead_engineer
-  python pdf_onepager.py --pdf Vertrag.pdf --out summary.md --format markdown
-  python pdf_onepager.py --pdf Report.pdf --base-url http://192.168.1.100:11434
-  python pdf_onepager.py --pdf Vertrag.pdf --format docx --out zusammenfassung.docx"""
+  python pdf_onepager.py --pdf Vertrag.pdf --format docx --out zusammenfassung.docx
+
+  # Ganzer Ordner (Batch):
+  python pdf_onepager.py --dir /pfad/zu/pdfs/
+  python pdf_onepager.py --dir /pfad/zu/pdfs/ --format docx --out-dir /pfad/zu/output/
+  python pdf_onepager.py --dir /pfad/zu/pdfs/ --recursive"""
     )
-    ap.add_argument("--pdf", required=True, help="Pfad zur PDF-Datei")
+    group = ap.add_mutually_exclusive_group(required=True)
+    group.add_argument("--pdf", help="Pfad zur PDF-Datei (Einzelmodus)")
+    group.add_argument("--dir", help="Pfad zum Verzeichnis mit PDFs (Batch-Modus)")
     ap.add_argument("--model", default="llama4:latest", help="Ollama Modell (default: llama4:latest)")
     ap.add_argument("--base-url", default="http://localhost:11434",
                     help="Ollama API URL (default: http://localhost:11434)")
@@ -682,7 +912,9 @@ def main():
                     help="Zielgruppe (default: auto → je nach Dokumenttyp)")
     ap.add_argument("--format", default="markdown", choices=["markdown", "plain", "docx"],
                     help="Ausgabeformat (default: markdown). 'docx' erzeugt ein Word-Dokument.")
-    ap.add_argument("--out", default="", help="Output-Datei. Leer = stdout.")
+    ap.add_argument("--out", default="", help="Output-Datei (nur Einzelmodus). Leer = stdout.")
+    ap.add_argument("--out-dir", default="", help="Output-Verzeichnis (nur Batch-Modus). Leer = _summaries im Quellordner.")
+    ap.add_argument("--recursive", action="store_true", help="Unterordner einschliessen (nur Batch-Modus)")
     ap.add_argument("--chunk-tokens", type=int, default=1800,
                     help="Ziel-Tokens pro Chunk (default: 1800)")
     ap.add_argument("--overlap-tokens", type=int, default=200,
@@ -691,74 +923,35 @@ def main():
                     help="Timeout pro LLM-Call in Sekunden (default: 300)")
     args = ap.parse_args()
 
-    t_start = time.time()
-    _log(f"=== PDF One-Pager ===")
-    _log(f"PDF:   {args.pdf}")
-    _log(f"Model: {args.model}")
-    _log(f"URL:   {args.base_url}")
-    _log("")
-
-    # 1. Extract
-    _log("📄 Extrahiere PDF-Text...")
-    text, extractor = extract_pdf_text(args.pdf)
-    n_pages = text.count("\n\n") // 2 or 1  # rough estimate
-    _log(f"   → {len(text):,} Zeichen via {extractor} (~{n_pages} Seiten)")
-
-    # 2. Classify
     client = OllamaClient(base_url=args.base_url, default_timeout=args.timeout)
-    doc_type, conf, signals = classify_document(client, args.model, text)
-    audience = choose_audience(doc_type, args.audience)
-    _log(f"   Audience: {audience}")
 
-    # 3. Chunk
-    chunks = split_into_chunks(text, target_tokens=args.chunk_tokens, overlap_tokens=args.overlap_tokens)
-    _log(f"\n📦 {len(chunks)} Chunks erstellt")
-
-    # 4. MAP
-    _log(f"\n🔬 MAP Phase ({len(chunks)} Chunks):")
-    facts = map_extract_facts(client, args.model, doc_type, audience, chunks)
-
-    # 5. REDUCE
-    _log(f"\n📝 REDUCE Phase:")
-    filename = os.path.basename(args.pdf)
-    onepager = reduce_onepager(
-        client, args.model, doc_type, audience, facts,
-        filename=filename, output_format=args.format,
-    )
-
-    # 6. Output
-    elapsed = time.time() - t_start
-    meta = {
-        "pdf": args.pdf,
-        "model": args.model,
-        "doc_type": doc_type,
-        "confidence": conf,
-        "audience": audience,
-        "chunks": len(chunks),
-        "extractor": extractor,
-        "elapsed": elapsed,
-    }
-
-    if args.format == "docx":
-        out_path = args.out or os.path.splitext(os.path.basename(args.pdf))[0] + "_onepager.docx"
-        _write_docx(onepager, out_path, meta)
-        _log(f"\n✅ Word-Dokument gespeichert: {out_path}")
-    else:
-        header = (
-            f"<!-- PDF One-Pager -->\n"
-            f"<!-- PDF: {args.pdf} -->\n"
-            f"<!-- Model: {args.model} | Type: {doc_type} ({conf:.0%}) | Audience: {audience} -->\n"
-            f"<!-- Chunks: {len(chunks)} | Extractor: {extractor} | Zeit: {elapsed:.0f}s -->\n\n"
+    if args.dir:
+        # Batch mode
+        results = run_batch(
+            dir_path=args.dir, client=client, model=args.model,
+            audience_arg=args.audience, output_format=args.format,
+            out_dir=args.out_dir, chunk_tokens=args.chunk_tokens,
+            overlap_tokens=args.overlap_tokens, recursive=args.recursive,
         )
-        output = header + onepager + "\n"
-        if args.out:
-            with open(args.out, "w", encoding="utf-8") as f:
-                f.write(output)
-            _log(f"\n✅ Gespeichert: {args.out}")
-        else:
-            print(output)
+        failed = [r for r in results if not r.success]
+        if failed:
+            sys.exit(1)
+    else:
+        # Single PDF mode
+        _log(f"=== PDF One-Pager ===")
+        _log(f"PDF:   {args.pdf}")
+        _log(f"Model: {args.model}")
+        _log(f"URL:   {args.base_url}")
+        _log("")
 
-    _log(f"\n=== Fertig in {elapsed:.0f}s ({len(chunks)} Chunks, {doc_type}/{audience}) ===")
+        result = process_single_pdf(
+            pdf_path=args.pdf, client=client, model=args.model,
+            audience_arg=args.audience, output_format=args.format,
+            out_path=args.out, chunk_tokens=args.chunk_tokens,
+            overlap_tokens=args.overlap_tokens,
+        )
+        if not result.success:
+            sys.exit(1)
 
 
 if __name__ == "__main__":
