@@ -934,8 +934,17 @@ async def _execute_compare_documents(args: dict, tenant=None) -> str:
 
 
 async def _execute_summarize_document(args: dict, tenant=None) -> str:
-    """Execute summarize_document tool – chapter-wise document summarization."""
+    """Execute summarize_document tool – Map-Reduce document summarization.
+    
+    Pipeline (like pdf_onepager.py):
+      1. Fetch document text from ES
+      2. Classify document type (technical/contractual)
+      3. Split into overlapping chunks
+      4. MAP: Extract structured facts per chunk (JSON)
+      5. REDUCE: Synthesize all facts into a structured summary
+    """
     import re
+    import httpx
     
     path = args.get("path", "")
     focus = args.get("focus", "")
@@ -945,7 +954,6 @@ async def _execute_summarize_document(args: dict, tenant=None) -> str:
         return "Fehler: Kein Dokumentpfad angegeben."
     
     from .source_analyzer import fetch_document_text
-    from .rag_pipeline import SimpleRAGPipeline
     
     es_index = tenant.es_index if tenant else None
     content, metadata = await fetch_document_text(path, es_index=es_index)
@@ -955,153 +963,202 @@ async def _execute_summarize_document(args: dict, tenant=None) -> str:
     
     doc_name = os.path.basename(path)
     total_chars = len(content)
-    print(f"📑 summarize_document: {doc_name} ({total_chars:,} Zeichen), detail={detail_level}, focus={focus or 'allgemein'}")
+    print(f"📑 summarize_document [Map-Reduce]: {doc_name} ({total_chars:,} Zeichen), detail={detail_level}, focus={focus or 'allgemein'}")
     
-    # --- Detect chapter structure ---
-    # Pattern: numbered sections (1. / 1.1 / Art. 5 / Kapitel 3), markdown headings, or UPPERCASE lines
-    chapter_pattern = re.compile(
-        r'^(?:'
-        r'(?:Art\.?\s*\d+|Artikel\s+\d+)'          # Art. 5 / Artikel 5
-        r'|(?:\d+\.(?:\d+\.?)*)\s+\S'               # 1. / 1.1 / 1.2.3 Title
-        r'|#{1,4}\s+\S'                              # Markdown headings
-        r'|(?:Kapitel|Abschnitt|Teil|Anhang)\s+\S'   # Kapitel/Abschnitt/Teil
-        r'|[A-ZÄÖÜ][A-ZÄÖÜ\s\-]{8,}$'              # UPPERCASE HEADINGS (min 8 chars)
-        r')',
-        re.MULTILINE
-    )
-    
-    lines = content.split('\n')
-    chapters = []
-    current_title = "Einleitung"
-    current_lines = []
-    
-    for line in lines:
-        stripped = line.strip()
-        if stripped and chapter_pattern.match(stripped) and len(current_lines) > 3:
-            # Save previous chapter
-            chapter_text = '\n'.join(current_lines).strip()
-            if chapter_text:
-                chapters.append({"title": current_title, "text": chapter_text})
-            current_title = stripped[:120]
-            current_lines = [line]
-        else:
-            current_lines.append(line)
-    
-    # Don't forget last chapter
-    if current_lines:
-        chapter_text = '\n'.join(current_lines).strip()
-        if chapter_text:
-            chapters.append({"title": current_title, "text": chapter_text})
-    
-    # If no chapters detected (or just 1), split by size
-    if len(chapters) <= 1 and total_chars > 3000:
-        chunk_size = 4000
-        chapters = []
-        for i in range(0, total_chars, chunk_size):
-            chunk = content[i:i + chunk_size]
-            # Try to break at paragraph boundary
-            if i + chunk_size < total_chars:
-                last_para = chunk.rfind('\n\n')
-                if last_para > chunk_size // 2:
-                    chunk = chunk[:last_para]
-            first_line = chunk.strip().split('\n')[0][:80]
-            chapters.append({"title": f"Abschnitt {len(chapters)+1}: {first_line}", "text": chunk})
-    
-    print(f"📑 Detected {len(chapters)} chapters/sections")
-    
-    # --- Summarize each chapter via LLM ---
+    ollama_base = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
     model = os.getenv("OLLAMA_MODEL_ANSWER", "llama4:latest")
-    pipeline = SimpleRAGPipeline(model=model)
     
-    # Detail-level configuration
+    async def _llm_call(messages: list, temperature: float = 0.2) -> str:
+        """Async LLM call to Ollama."""
+        total = sum(len(m.get("content", "")) for m in messages)
+        num_ctx = max(4096, int(total / 3) + 4096)
+        num_ctx = min(num_ctx, 65536)
+        payload = {
+            "model": model, "messages": messages, "stream": False,
+            "options": {"num_ctx": num_ctx, "temperature": temperature, "num_predict": 4096}
+        }
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            r = await client.post(f"{ollama_base}/api/chat", json=payload)
+            r.raise_for_status()
+            return r.json()["message"]["content"]
+    
+    # --- Step 1: Classify document type ---
+    _CONTRACTUAL_KW = {
+        "vertrag", "werkvertrag", "agb", "haftung", "sla", "datenschutz",
+        "pönale", "konventionalstrafe", "sia", "vergütung", "abnahme",
+        "gewährleistung", "kündigung", "schadenersatz", "offerte", "nachtrag",
+    }
+    excerpt_lower = content[:12000].lower()
+    kw_hits = [kw for kw in _CONTRACTUAL_KW if kw in excerpt_lower]
+    doc_type = "contractual" if len(kw_hits) >= 2 else "technical"
+    print(f"  📋 Typ: {doc_type} (Keywords: {', '.join(kw_hits[:5]) if kw_hits else 'keine'})")
+    
+    # --- Step 2: Split into overlapping chunks ---
+    def _split_chunks(text: str, target_tokens: int = 1800, overlap_tokens: int = 200):
+        paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+        if len(paras) <= 2 and len(text) > 3000:
+            lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+            paras = ["\n".join(lines[i:i+10]) for i in range(0, len(lines), 10)]
+        chunks, cur, cur_toks = [], [], 0
+        for p in paras:
+            pt = max(1, int(len(p) / 3.5))
+            if cur_toks + pt > target_tokens and cur:
+                chunks.append("\n\n".join(cur))
+                cur, cur_toks = [], 0
+            cur.append(p)
+            cur_toks += pt
+        if cur:
+            chunks.append("\n\n".join(cur))
+        if overlap_tokens > 0 and len(chunks) > 1:
+            overlapped = [chunks[0]]
+            for i in range(1, len(chunks)):
+                tail = chunks[i-1][-(overlap_tokens * 4):]
+                overlapped.append(f"{tail}\n\n{chunks[i]}")
+            chunks = overlapped
+        return chunks
+    
+    # Detail-level affects chunk count
     if detail_level == "kurz":
-        max_words = 50
-        max_chapters = 8
-        instruction = "Fasse in 1-2 Sätzen zusammen. Nur die Kernaussage."
+        max_chunks = 6
     elif detail_level == "ausführlich":
-        max_words = 200
-        max_chapters = 20
-        instruction = "Fasse ausführlich zusammen. Nenne konkrete Fakten, Zahlen, Daten, Namen und Fristen."
-    else:  # mittel
-        max_words = 100
-        max_chapters = 12
-        instruction = "Fasse in 3-5 Sätzen zusammen. Nenne die wichtigsten Fakten und Zahlen."
+        max_chunks = 16
+    else:
+        max_chunks = 10
     
-    focus_hint = f" Fokus besonders auf: {focus}." if focus else ""
+    chunks = _split_chunks(content)
+    if len(chunks) > max_chunks:
+        chunks = chunks[:max_chunks]
+    print(f"  📦 {len(chunks)} Chunks")
     
-    # Limit chapters to process
-    chapters_to_process = chapters[:max_chapters]
+    # --- Step 3: MAP – Extract structured facts per chunk ---
+    MAP_SYSTEM = (
+        "Du bist ein exakter Assistent für Dokumenten-Analyse in Schweizer Infrastrukturprojekten. "
+        "Halte dich strikt an die JSON-Ausgabestruktur. "
+        "Keine Halluzinationen: Wenn etwas nicht im Text steht, lass das Feld leer oder schreibe 'Nicht erwähnt'. "
+        "Gib NUR valides JSON zurück, keine Markdown-Fences."
+    )
+    focus_hint = f"\nFokus besonders auf: {focus}" if focus else ""
     
-    chapter_summaries = []
-    for i, ch in enumerate(chapters_to_process):
-        ch_text = ch["text"][:8000]  # Max 8K per chapter for LLM context
-        
-        summary_prompt = [
-            {"role": "system", "content": (
-                f"Du bist ein präziser Dokumenten-Zusammenfasser. {instruction}{focus_hint} "
-                f"Antworte auf Deutsch. Keine Einleitungen, direkt die Zusammenfassung. "
-                f"Maximal {max_words} Wörter."
-            )},
-            {"role": "user", "content": (
-                f"Fasse folgenden Abschnitt zusammen:\n\n"
-                f"--- {ch['title']} ---\n{ch_text}"
-            )}
-        ]
+    all_facts = []
+    for i, chunk in enumerate(chunks):
+        map_user = (
+            f"Dokumenttyp: {doc_type}\n"
+            f"Chunk {i+1}/{len(chunks)}{focus_hint}\n\n"
+            f"Extrahiere aus dem folgenden TEXTCHUNK die wichtigsten Fakten als kompaktes JSON:\n"
+            f'{{"key_points": ["max 5 Kernaussagen"], '
+            f'"entities": ["Firmen/Personen/Systeme"], '
+            f'"dates_numbers": ["Daten, Beträge, Fristen, KPIs"], '
+            f'"risks_issues": ["Risiken/Offene Punkte"], '
+            f'"actions": ["Konkrete To-dos/Pendenzen"], '
+            f'"coverage": "1 Satz: welche Themen dieser Chunk abdeckt"}}\n\n'
+            f"TEXTCHUNK:\n---\n{chunk[:10000]}\n---"
+        )
         
         try:
-            summary = await pipeline._llm_complete(summary_prompt, temperature=0.3)
-            chapter_summaries.append({"title": ch["title"], "summary": summary.strip(), "chars": len(ch["text"])})
-            print(f"  ✅ Chapter {i+1}/{len(chapters_to_process)}: {ch['title'][:50]} → {len(summary)} chars")
+            resp = await _llm_call(
+                [{"role": "system", "content": MAP_SYSTEM},
+                 {"role": "user", "content": map_user}],
+                temperature=0.1
+            )
+            # Parse JSON robustly
+            obj = None
+            for strategy in [
+                lambda t: json.loads(t.strip()),
+                lambda t: json.loads(re.sub(r"```(?:json)?\s*\n?", "", t).rstrip("`").strip()),
+                lambda t: json.loads(t[t.find("{"):t.rfind("}")+1]),
+            ]:
+                try:
+                    obj = strategy(resp)
+                    break
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            if obj is None:
+                obj = {"key_points": [resp[:500]], "coverage": "Parse-Fehler"}
+            obj["_chunk"] = i + 1
+            all_facts.append(obj)
+            n_points = len(obj.get("key_points", []))
+            print(f"  ✅ MAP {i+1}/{len(chunks)}: {n_points} Punkte")
         except Exception as e:
-            print(f"  ❌ Chapter {i+1} failed: {e}")
-            chapter_summaries.append({"title": ch["title"], "summary": f"(Zusammenfassung fehlgeschlagen: {e})", "chars": len(ch["text"])})
+            print(f"  ❌ MAP {i+1} failed: {e}")
+            all_facts.append({"_chunk": i+1, "key_points": [f"Fehler: {e}"], "coverage": "Fehler"})
     
-    # --- Generate Executive Summary from chapter summaries ---
-    all_chapter_text = "\n".join(f"- {cs['title']}: {cs['summary']}" for cs in chapter_summaries)
+    # --- Step 4: REDUCE – Synthesize one-pager from all facts ---
+    facts_json = json.dumps(all_facts, ensure_ascii=False, indent=1)
+    if len(facts_json) > 30000:
+        facts_json = facts_json[:30000] + "\n... (gekürzt)"
     
-    exec_prompt = [
-        {"role": "system", "content": (
-            f"Du bist ein präziser Dokumenten-Zusammenfasser. Erstelle eine Executive Summary "
-            f"(max 200 Wörter) aus den folgenden Kapitel-Zusammenfassungen.{focus_hint} "
-            f"Nenne die wichtigsten Fakten, Zahlen und Schlüsselbegriffe. Deutsch. Keine Einleitung."
-        )},
-        {"role": "user", "content": (
-            f"Dokument: {doc_name}\n\n"
-            f"Kapitel-Zusammenfassungen:\n{all_chapter_text}"
-        )}
-    ]
+    if doc_type == "contractual":
+        format_template = (
+            "## Kontext & Zweck\n2-3 Sätze\n\n"
+            "## Kernaussagen\n- 5-8 Bullets\n\n"
+            "## Wichtige Zahlen / Daten / Fristen\n- Bullets\n\n"
+            "## Vertragliche Pflichten & Konditionen\n- Wesentliche Pflichten beider Parteien\n\n"
+            "## Risiken & offene Punkte\n- NUR was im Dokument steht\n\n"
+            "## Pendenzen\n- NUR wenn explizit im Dokument\n\n"
+            "## Relevante Entitäten\nKompakt, komma-separiert"
+        )
+    else:
+        format_template = (
+            "## Kontext & Zweck\n2-3 Sätze\n\n"
+            "## Kernaussagen\n- 5-8 Bullets\n\n"
+            "## Wichtige Zahlen / Daten / Fristen\n- Bullets\n\n"
+            "## Risiken & offene Punkte\n- NUR was im Dokument steht\n\n"
+            "## Pendenzen / Nächste Schritte\n- NUR wenn explizit im Dokument\n\n"
+            "## Relevante Entitäten\nKompakt, komma-separiert"
+        )
+    
+    # Adjust reduce verbosity by detail level
+    if detail_level == "kurz":
+        word_target = "300-400 Wörter"
+    elif detail_level == "ausführlich":
+        word_target = "600-800 Wörter, mit konkreten Zitaten und Zahlen aus dem Dokument"
+    else:
+        word_target = "450-600 Wörter"
+    
+    reduce_system = (
+        "Du bist ein Senior Technical Writer für Schweizer Infrastrukturprojekte. "
+        f"Erzeuge eine strukturierte Zusammenfassung ({word_target}, deutsch). "
+        "KEINE erfundenen Details, KEINE Vermutungen, KEINE generischen Empfehlungen. "
+        "Wenn etwas nicht explizit im Dokument steht, schreibe 'Nicht im Dokument erwähnt'. "
+        "Erfinde KEINE Handlungsempfehlungen die nicht im Dokument stehen."
+    )
+    
+    reduce_user = (
+        f"Dokumenttyp: {doc_type}\n"
+        f"Quelle: {doc_name}\n"
+        + (f"Fokus: {focus}\n" if focus else "")
+        + f"\nVerdichte die folgenden extrahierten Chunk-Fakten zu einer strukturierten Zusammenfassung.\n\n"
+        f"Ausgabeformat:\n\n# {doc_name}\n\n{format_template}\n\n"
+        f"Chunk-Fakten ({len(chunks)} Abschnitte):\n{facts_json}"
+    )
     
     try:
-        executive_summary = await pipeline._llm_complete(exec_prompt, temperature=0.3)
+        summary = await _llm_call(
+            [{"role": "system", "content": reduce_system},
+             {"role": "user", "content": reduce_user}],
+            temperature=0.2
+        )
+        print(f"  ✅ REDUCE: {len(summary)} Zeichen")
     except Exception as e:
-        executive_summary = f"(Executive Summary fehlgeschlagen: {e})"
+        print(f"  ❌ REDUCE failed: {e}")
+        # Fallback: concatenate MAP facts
+        summary = f"# {doc_name}\n\n(REDUCE fehlgeschlagen: {e})\n\n## Extrahierte Fakten\n\n"
+        for fact in all_facts:
+            for kp in fact.get("key_points", []):
+                summary += f"- {kp}\n"
     
-    # --- Build structured output ---
-    parts = [
-        f"=== ZUSAMMENFASSUNG: {doc_name} ===",
-        f"Umfang: {total_chars:,} Zeichen, {len(chapters)} Kapitel erkannt",
-        f"Detailgrad: {detail_level}" + (f", Fokus: {focus}" if focus else ""),
-        "",
-        f"## Executive Summary",
-        executive_summary.strip(),
-        "",
-        f"## Kapitel-Übersicht ({len(chapter_summaries)} Abschnitte)",
-    ]
+    # --- Build final output ---
+    header = (
+        f"=== ZUSAMMENFASSUNG (Map-Reduce): {doc_name} ===\n"
+        f"Umfang: {total_chars:,} Zeichen | {len(chunks)} Chunks | Typ: {doc_type}\n"
+        f"Detailgrad: {detail_level}" + (f" | Fokus: {focus}" if focus else "") + "\n\n"
+    )
     
-    for i, cs in enumerate(chapter_summaries, 1):
-        parts.append(f"\n### {i}. {cs['title']}")
-        parts.append(f"({cs['chars']:,} Zeichen)")
-        parts.append(cs["summary"])
-    
-    if len(chapters) > max_chapters:
-        parts.append(f"\n[... {len(chapters) - max_chapters} weitere Kapitel nicht zusammengefasst. "
-                     f"Nutze detail_level='ausführlich' für mehr.]")
-    
-    result = "\n".join(parts)
+    result = header + summary.strip()
     if len(result) > 20000:
         result = result[:20000] + f"\n\n[... gekürzt, {len(result)} Zeichen total]"
     
-    print(f"📑 summarize_document: done, {len(chapter_summaries)} chapters, {len(result)} chars output")
+    print(f"📑 summarize_document: done, {len(chunks)} chunks, {len(result)} chars output")
     return result
 
 
