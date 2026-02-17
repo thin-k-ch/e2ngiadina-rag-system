@@ -39,6 +39,8 @@ echo ""
 echo "Starte in 5 Sekunden... (Ctrl+C zum Abbrechen)"
 sleep 5
 
+mkdir -p "$RUN_DIR"
+
 nohup python3 scripts/batch_report.py \
     --model "$MODEL" \
     --es-index "$ES_INDEX" \
