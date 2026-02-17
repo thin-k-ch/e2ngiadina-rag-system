@@ -238,21 +238,30 @@ class RAGPipeline(ABC):
         """
         temp = temperature if temperature is not None else RAG_ANSWER_TEMPERATURE
         
-        base_prompt = """DU BIST EIN DOKUMENTEN-ANALYST FÜR SCHWEIZER EISENBAHN-PROJEKTE (SBB TFK 2020 - Tunnelfunk).
-Fachgebiete: Projektleitung, Programmleitung, Funktechnik, Tunnelfunk.
+        base_prompt = """DU BIST EIN SENIOR DOKUMENTEN-ANALYST FÜR SCHWEIZER EISENBAHN-INFRASTRUKTURPROJEKTE.
+Schwerpunkt: BLS TFK18 (Tunnelfunk-Ersetzung 2018), SBB TFK 2020, GSM-R, Projektabschlussberichte.
+Fachgebiete: Projektleitung, Programmleitung, HF-/Funktechnik, Tunnelfunk, Abnahmeprozesse, Vertragsmanagement.
 
-FACHBEGRIFFE: FAT=Werksabnahme, SAT=Standortabnahme, TFK=Tunnelfunk, GBT=Gotthard Basistunnel, RBT=Rhomberg Bahntechnik
+FACHBEGRIFFE: FAT=Werksabnahme, SAT=Standortabnahme, TFK=Tunnelfunk, GBT=Gotthard-Basistunnel, LBT=Lötschberg-Basistunnel, RBT=Rhomberg Bahntechnik, PIM=Passive Intermodulation, DoD=Definition of Done, RACI=Responsible/Accountable/Consulted/Informed, PROFUMO=Projektführungsmodell
 
-DEINE AUFGABE: Extrahiere konkrete Fakten aus den Dokumenten und präsentiere sie strukturiert.
+DEINE AUFGABE: Liefere ausführliche, faktenbasierte Analysen. Nutze ALLE relevanten Informationen aus dem Kontext.
+
+KONTEXT-HIERARCHIE:
+- Abschnitte mit "VERIFIZIERTE BEFUNDE" sind vorab geprüfte Analyseergebnisse (höchste Priorität). Zitiere sie mit [F1], [F2] etc.
+- Abschnitte mit "DOKUMENT-KONTEXT" sind Originalquellen. Zitiere sie mit [1], [2] etc.
+- Wenn beide vorliegen, bevorzuge verifizierte Befunde und ergänze mit Originalquellen.
 
 ANTWORT-FORMAT (ZWINGEND):
-1. Antworte auf Deutsch
-2. Starte DIREKT mit Fakten aus den Dokumenten - KEINE Einleitung
-3. Zitiere jede Aussage mit [N] (Quellennummer)
-4. Nutze Aufzählungen und kurze Absätze
-5. Wenn Dokumente Informationen enthalten, ZITIERE sie - sage NIEMALS "die Dokumente sind allgemein"
+1. Antworte IMMER auf Deutsch, ausführlich und strukturiert
+2. Starte DIREKT mit Fakten – KEINE Einleitung wie "Basierend auf den Dokumenten..."
+3. Zitiere JEDE Aussage mit Quellennummer [N] oder [FN]
+4. Nutze Markdown: Überschriften (##), Aufzählungen, **Fettdruck** für Kernaussagen, Tabellen wo sinnvoll
+5. Bei komplexen Fragen: Gliedere in Abschnitte (z.B. Sachverhalt, Ursachen, Auswirkungen, Empfehlungen)
+6. Nenne konkrete Zahlen, Daten, Namen, Dokumenttitel wenn verfügbar
+7. NIEMALS: "die Dokumente sind allgemein" – extrahiere immer spezifische Details
+8. Wenn du etwas NICHT in den Quellen findest, sage explizit was fehlt
 
-WICHTIG: Dir werden Dokumente als Kontext bereitgestellt. Nutze sie IMMER und zitiere daraus.
+UMFANG: Antworte ausführlich (mindestens 200 Wörter bei Sachfragen). Kurze Antworten nur bei einfachen Ja/Nein-Fragen.
 
 CODE-AUSFÜHRUNG: Du kannst Python-Code schreiben, der automatisch ausgeführt wird.
 Wenn du Daten analysieren, Dateien auflisten, zählen oder berechnen musst, schreibe einen ```python Code-Block.
@@ -505,15 +514,44 @@ class SimpleRAGPipeline(RAGPipeline):
         top_paths = [h.get("path", "") for h in ranked_hits[:5]]
         print(f"📊 TOP 5 RANKED: {top_paths}")
         
+        # Phase 1b: Search pre-computed findings (knowledge layer)
+        findings_context = ""
+        findings_count = 0
+        try:
+            findings_hits = await asyncio.to_thread(
+                self.tools.search_findings, search_query, top_k=5
+            )
+            if findings_hits:
+                findings_count = len(findings_hits)
+                parts = []
+                for i, fh in enumerate(findings_hits, 1):
+                    title = fh.get("title", "")
+                    cat = fh.get("category", "")
+                    impact = fh.get("impact", "")
+                    text = fh.get("text", "")
+                    ev_docs = fh.get("evidence_docs", "")
+                    header = f"[F{i}] {title} ({cat}, Impact: {impact})"
+                    if ev_docs:
+                        header += f"\n    Quellen: {ev_docs}"
+                    parts.append(f"{header}\n{text}")
+                findings_context = "\n\n".join(parts)
+                print(f"📋 Findings: {findings_count} relevant (dist: {[round(f.get('distance', 0), 2) for f in findings_hits]})")
+        except Exception as e:
+            print(f"⚠️ Findings search skipped: {e}")
+
         # Phase 2: Build Context (config-based)
         yield Event("phase_start", phase="context")
         context = self._build_context(ranked_hits, max_docs=max_context_docs)
         
+        # Prepend findings as priority knowledge layer
+        if findings_context:
+            context = f"=== VERIFIZIERTE BEFUNDE (aus Dokumentenanalyse) ===\n{findings_context}\n\n=== DOKUMENT-KONTEXT ===\n{context}"
+
         # For follow-ups: prepend previous source documents to context
         if prev_doc_context:
-            context = f"=== VORHERIGE DOKUMENTE (aus letzter Anfrage) ===\n{prev_doc_context}\n\n=== NEUE SUCHERGEBNISSE ===\n{context}"
+            context = f"=== VORHERIGE DOKUMENTE (aus letzter Anfrage) ===\n{prev_doc_context}\n\n{context}"
         
-        yield Event("context_built", doc_count=len(ranked_hits[:max_context_docs]), context_length=len(context))
+        yield Event("context_built", doc_count=len(ranked_hits[:max_context_docs]) + findings_count, context_length=len(context))
         
         # Phase 3: Generate Answer (streaming, config-based temp)
         yield Event("phase_start", phase="answer")

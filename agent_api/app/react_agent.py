@@ -266,9 +266,10 @@ TOOLS = [
 # System Prompt for the ReAct Agent
 # ---------------------------------------------------------------------------
 
-REACT_SYSTEM_PROMPT = """DU BIST EIN AUTONOMER DOKUMENTEN-ANALYST für Schweizer Eisenbahn-Projekte (SBB TFK 2020 - Tunnelfunk).
+REACT_SYSTEM_PROMPT = """DU BIST EIN AUTONOMER SENIOR DOKUMENTEN-ANALYST für Schweizer Eisenbahn-Infrastrukturprojekte.
+Schwerpunkt: BLS TFK18 (Tunnelfunk-Ersetzung 2018), SBB TFK 2020, GSM-R, Projektabschlussberichte.
 
-FACHBEGRIFFE: FAT=Werksabnahme, SAT=Standortabnahme, TFK=Tunnelfunk, GBT=Gotthard Basistunnel, RBT=Rhomberg Bahntechnik
+FACHBEGRIFFE: FAT=Werksabnahme, SAT=Standortabnahme, TFK=Tunnelfunk, GBT=Gotthard-Basistunnel, LBT=Lötschberg-Basistunnel, RBT=Rhomberg Bahntechnik, PIM=Passive Intermodulation, DoD=Definition of Done, RACI=Responsible/Accountable/Consulted/Informed, PROFUMO=Projektführungsmodell
 
 TOOLS (nutze sie aktiv – vermute nicht, suche und lies!):
 - search_documents: Projektarchiv durchsuchen (Elasticsearch + ChromaDB)
@@ -307,14 +308,20 @@ ARBEITSWEISE:
 8. Externes Wissen (Normen, Preise, Nachrichten): web_search
 9. Mehrere Tools kombinieren und mehrere Schritte machen
 
+KONTEXT-HIERARCHIE (bei Suchergebnissen):
+- "VERIFIZIERTE BEFUNDE" [F1], [F2] etc. = vorab geprüfte Analyseergebnisse (höchste Priorität)
+- "DOKUMENT-KONTEXT" [1], [2] etc. = Originalquellen aus dem Projektarchiv
+- Wenn beides vorliegt: Befunde bevorzugen, mit Originalquellen ergänzen
+
 ANTWORT-REGELN:
-- Antworte auf Deutsch
+- Antworte IMMER auf Deutsch, AUSFÜHRLICH und STRUKTURIERT (mindestens 200 Wörter bei Sachfragen)
 - Starte DIREKT mit der konkreten Antwort – KEINE Einleitungen ("Basierend auf...", "Gerne...", "Es scheint...")
 - ZITIERE exakte Textpassagen aus den Dokumenten in Anführungszeichen: "exakter Text" [Dateiname]
-- Nenne Seitenzahlen, Datumswerte und Kapitelnummern wenn verfügbar
+- Nenne Seitenzahlen, Datumswerte, Kapitelnummern, konkrete Zahlen wenn verfügbar
 - Verwende Indikativ, nicht Konjunktiv ("Der Vertrag regelt..." statt "Der Vertrag könnte regeln...")
 - Nenne die KONKRETEN Dokumente, in denen die Information steht (Vertrag, Protokoll, E-Mail etc.)
-- Strukturiere mit Markdown: Überschriften (##), Aufzählungen, **Fettdruck** für Schlüsselbegriffe
+- Strukturiere mit Markdown: Überschriften (##), Aufzählungen, **Fettdruck** für Schlüsselbegriffe, Tabellen wo sinnvoll
+- Bei komplexen Fragen: Gliedere in Abschnitte (Sachverhalt, Ursachen, Auswirkungen, Empfehlungen)
 - Wenn du ein Hauptdokument findest (z.B. Werkvertrag, Pflichtenheft), nenne es PROMINENT am Anfang
 - Bei Begrüssungen (Hallo, Hi): antworte kurz und freundlich, liste NICHT deine Tools auf
 
@@ -383,12 +390,36 @@ async def _execute_search(args: dict, tenant=None) -> str:
     from .reranker import rerank
     ranked = await asyncio.to_thread(rerank, query, ranked)
     
+    # Search pre-computed findings (knowledge layer)
+    findings_parts = []
+    try:
+        findings_hits = await asyncio.to_thread(tools.search_findings, rewritten, top_k=3)
+        if findings_hits:
+            findings_parts.append("=== VERIFIZIERTE BEFUNDE (vorab geprüft, höchste Priorität) ===")
+            for i, fh in enumerate(findings_hits, 1):
+                title = fh.get("title", "")
+                cat = fh.get("category", "")
+                impact = fh.get("impact", "")
+                text = fh.get("text", "")
+                ev_docs = fh.get("evidence_docs", "")
+                header = f"[F{i}] {title} ({cat}, Impact: {impact})"
+                if ev_docs:
+                    header += f"\n    Quellen: {ev_docs}"
+                findings_parts.append(f"{header}\n{text}\n")
+            print(f"📋 Findings in search: {len(findings_hits)} (dist: {[round(f.get('distance', 0), 2) for f in findings_hits]})")
+    except Exception as e:
+        print(f"⚠️ Findings search skipped: {e}")
+
     # Format top results for the LLM
     top_n = ranked[:10]
-    if not top_n:
+    if not top_n and not findings_parts:
         return f"Keine Treffer für '{query}'."
     
-    parts = [f"Suche '{query}': {len(ranked)} Treffer. Top {len(top_n)}:\n"]
+    parts = []
+    if findings_parts:
+        parts.extend(findings_parts)
+        parts.append("")
+    parts.append(f"=== DOKUMENT-KONTEXT (Suche '{query}': {len(ranked)} Treffer, Top {len(top_n)}) ===")
     for i, h in enumerate(top_n, 1):
         snippet = h.get("snippet", "")[:500]
         parts.append(f"[{i}] {h['path']}\n{snippet}\n")
@@ -1488,7 +1519,23 @@ WICHTIG für answer_hint:
         messages = self._build_system_messages(query, chat_history, system_prompt_extra)
         user_msg = messages.pop()  # Remove user query (re-add at end)
         
-        # If documents were read, use ONLY their full content (no search snippet noise)
+        # Extract findings from search results (always inject as priority context)
+        findings_block = ""
+        for ctx in search_context:
+            if "VERIFIZIERTE BEFUNDE" in ctx:
+                # Extract the findings section
+                start = ctx.find("=== VERIFIZIERTE BEFUNDE")
+                end = ctx.find("=== DOKUMENT-KONTEXT")
+                if start >= 0 and end > start:
+                    findings_block += ctx[start:end].strip() + "\n\n"
+                elif start >= 0:
+                    findings_block += ctx[start:].strip() + "\n\n"
+        
+        if findings_block:
+            messages.append({"role": "assistant", "content": "Vorab geprüfte Analyseergebnisse (höchste Priorität):"})
+            messages.append({"role": "tool", "content": findings_block[:8000]})
+        
+        # If documents were read, use their full content
         if read_context:
             for ctx in read_context:
                 truncated = ctx[:20000] if len(ctx) > 20000 else ctx

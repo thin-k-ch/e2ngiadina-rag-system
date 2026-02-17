@@ -40,7 +40,48 @@ class Tools:
         self.chroma_txt = ChromaClient(self.chroma_path, self.collection_txt)
         self.chroma_msg = ChromaClient(self.chroma_path, self.collection_msg)
         self.chroma_mail = ChromaClient(self.chroma_path, self.collection_mail)
+        # Pre-computed findings collection (loaded via load_findings_to_chroma.py)
+        self._findings_collection = os.getenv("COLLECTION_FINDINGS", "tfk18_findings")
+        try:
+            self.chroma_findings = ChromaClient(self.chroma_path, self._findings_collection)
+            _fc = self.chroma_findings.collection.count()
+            if _fc > 0:
+                print(f"📋 Findings collection '{self._findings_collection}': {_fc} entries")
+                self._has_findings = True
+            else:
+                self._has_findings = False
+        except Exception:
+            self.chroma_findings = None
+            self._has_findings = False
         self.es = ESTools()
+
+    def search_findings(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Search pre-computed findings collection. Returns list of finding dicts."""
+        if not self._has_findings or not self.chroma_findings:
+            return []
+        try:
+            emb = self.embedder.encode(query, convert_to_tensor=False).tolist()
+            res = self.chroma_findings.search(emb, top_k=top_k)
+            docs = res.get("documents", [[]])[0]
+            metas = res.get("metadatas", [[]])[0]
+            dists = res.get("distances", [[]])[0]
+            out = []
+            for doc, meta, dist in zip(docs, metas, dists):
+                if dist is not None and dist > 1.2:  # skip low-relevance
+                    continue
+                out.append({
+                    "text": doc,
+                    "title": meta.get("title", ""),
+                    "category": meta.get("category", ""),
+                    "impact": meta.get("impact", ""),
+                    "evidence_docs": meta.get("evidence_docs", ""),
+                    "distance": dist,
+                    "source_type": "finding",
+                })
+            return out
+        except Exception as e:
+            print(f"⚠️ Findings search error: {e}")
+            return []
 
     def _quoted(self, q: str) -> str | None:
         m = re.search(r"\"([^\"]+)\"", q)
