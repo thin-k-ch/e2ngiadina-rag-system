@@ -42,6 +42,8 @@ import uuid
 import hashlib
 import logging
 import argparse
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -80,7 +82,8 @@ class Config:
 
     # MAP phase
     map_retry: int = 2
-    map_sleep_s: float = 0.3
+    map_sleep_s: float = 0.1
+    map_workers: int = 4  # Concurrent Ollama requests for MAP phase
 
     # REDUCE phase
     reduce_batch_size: int = 40   # Claims per hierarchical REDUCE batch
@@ -452,8 +455,53 @@ TEXT:
 """
 
 
+def _map_one_candidate(cfg: Config, cand: Dict[str, Any]) -> Tuple[str, Optional[Dict], Optional[str]]:
+    """Process a single candidate through MAP. Returns (doc_id, claim_obj_or_None, error_or_None).
+    Thread-safe: no shared mutable state."""
+    doc_id = cand.get("doc_id", "")
+    path = cand.get("path", "")
+    text = cand.get("content", "")
+    topic = cand.get("topic", "")
+
+    prompt = MAP_USER_TEMPLATE.format(
+        path=path, topic=topic, text=text[:cfg.max_input_chars]
+    )
+
+    last_err = None
+    for attempt in range(cfg.map_retry + 1):
+        try:
+            raw = ollama_chat(
+                cfg,
+                messages=[
+                    {"role": "system", "content": MAP_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                num_predict=2048,
+            )
+            obj = extract_json_from_text(raw)
+            if not isinstance(obj, dict):
+                raise ValueError(f"Not a JSON object: {raw[:200]}")
+
+            obj["doc_id"] = doc_id
+            obj["path"] = path
+            obj["topic"] = topic
+            obj.setdefault("confidence", 0.3)
+            obj.setdefault("finding_candidate", None)
+            obj.setdefault("recommendation_candidate", None)
+
+            if obj.get("finding_candidate") or obj.get("recommendation_candidate"):
+                return (doc_id, obj, None)
+            return (doc_id, None, None)  # Empty claim, but no error
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(0.5 + attempt)
+
+    return (doc_id, None, last_err)
+
+
 def step_map(cfg: Config, logger: logging.Logger, candidates_path: str) -> str:
-    """Phase 2: MAP – Extract one claim per candidate chunk."""
+    """Phase 2: MAP – Extract one claim per candidate chunk (concurrent)."""
     out_path = os.path.join(cfg.out_dir, "claims.jsonl")
     done_path = os.path.join(cfg.out_dir, "map_done.json")
     errors_path = os.path.join(cfg.out_dir, "map_errors.jsonl")
@@ -466,6 +514,7 @@ def step_map(cfg: Config, logger: logging.Logger, candidates_path: str) -> str:
     remaining = [c for c in candidates if c.get("doc_id", "") not in done_ids]
 
     logger.info(f"MAP: {len(candidates)} candidates, {len(done_ids)} already done, {len(remaining)} remaining")
+    logger.info(f"MAP workers: {cfg.map_workers} concurrent threads")
 
     if not remaining:
         logger.info("[resume] MAP already complete")
@@ -474,73 +523,53 @@ def step_map(cfg: Config, logger: logging.Logger, candidates_path: str) -> str:
     success = 0
     fail = 0
     t_start = time.time()
+    write_lock = threading.Lock()
 
-    for i, cand in enumerate(tqdm(remaining, desc="MAP")):
-        doc_id = cand.get("doc_id", "")
-        path = cand.get("path", "")
-        text = cand.get("content", "")
-        topic = cand.get("topic", "")
-
-        prompt = MAP_USER_TEMPLATE.format(
-            path=path, topic=topic, text=text[:cfg.max_input_chars]
-        )
-
-        last_err = None
-        for attempt in range(cfg.map_retry + 1):
-            try:
-                raw = ollama_chat(
-                    cfg,
-                    messages=[
-                        {"role": "system", "content": MAP_SYSTEM},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.1,
-                    num_predict=2048,
-                )
-                obj = extract_json_from_text(raw)
-                if not isinstance(obj, dict):
-                    raise ValueError(f"Not a JSON object: {raw[:200]}")
-
-                # Enforce fields
-                obj["doc_id"] = doc_id
-                obj["path"] = path
-                obj["topic"] = topic
-                obj.setdefault("confidence", 0.3)
-                obj.setdefault("finding_candidate", None)
-                obj.setdefault("recommendation_candidate", None)
-
-                # Skip empty claims
-                if obj.get("finding_candidate") or obj.get("recommendation_candidate"):
-                    append_jsonl(out_path, obj)
-
-                done_ids.add(doc_id)
+    def on_result(doc_id, claim_obj, error, path=""):
+        nonlocal success, fail
+        with write_lock:
+            if error:
+                fail += 1
+                append_jsonl(errors_path, {"doc_id": doc_id, "path": path, "error": error})
+            else:
                 success += 1
-                break
-            except Exception as e:
-                last_err = str(e)
-                time.sleep(0.5 + attempt)
-
-        if doc_id not in done_ids:
-            fail += 1
-            append_jsonl(errors_path, {"doc_id": doc_id, "path": path, "error": last_err})
+                if claim_obj:
+                    append_jsonl(out_path, claim_obj)
             done_ids.add(doc_id)
+            total = success + fail
+            # Checkpoint every 50
+            if total % 50 == 0 and total > 0:
+                write_json(done_path, sorted(done_ids))
+                elapsed = time.time() - t_start
+                rate = total / elapsed if elapsed > 0 else 0
+                eta_s = (len(remaining) - total) / rate if rate > 0 else 0
+                logger.info(
+                    f"MAP checkpoint: {success}✅ {fail}❌ | "
+                    f"{rate:.2f} docs/s | ETA: {eta_s/60:.0f} min"
+                )
 
-        # Checkpoint + ETA every 50
-        if (success + fail) % 50 == 0 and (success + fail) > 0:
-            write_json(done_path, sorted(done_ids))
-            elapsed = time.time() - t_start
-            rate = (success + fail) / elapsed if elapsed > 0 else 0
-            eta_s = (len(remaining) - (success + fail)) / rate if rate > 0 else 0
-            logger.info(
-                f"MAP checkpoint: {success}✅ {fail}❌ | "
-                f"{rate:.1f} docs/s | ETA: {eta_s/60:.0f} min"
-            )
+    with ThreadPoolExecutor(max_workers=cfg.map_workers) as pool:
+        futures = {}
+        for cand in remaining:
+            f = pool.submit(_map_one_candidate, cfg, cand)
+            futures[f] = cand
 
-        time.sleep(cfg.map_sleep_s)
+        pbar = tqdm(total=len(remaining), desc=f"MAP ({cfg.map_workers}w)", initial=0)
+        for future in as_completed(futures):
+            cand = futures[future]
+            try:
+                doc_id, claim_obj, error = future.result()
+                on_result(doc_id, claim_obj, error, path=cand.get("path", ""))
+            except Exception as e:
+                doc_id = cand.get("doc_id", "")
+                on_result(doc_id, None, str(e), path=cand.get("path", ""))
+            pbar.update(1)
+        pbar.close()
 
     write_json(done_path, sorted(done_ids))
     total_claims = count_jsonl(out_path)
-    logger.info(f"MAP done: {success}✅ {fail}❌ | {total_claims} claims extracted")
+    elapsed = time.time() - t_start
+    logger.info(f"MAP done: {success}✅ {fail}❌ | {total_claims} claims | {elapsed/60:.1f} min | {cfg.map_workers} workers")
     return out_path
 
 
@@ -831,6 +860,8 @@ def parse_args():
     ap.add_argument("--max-candidates", type=int, default=3000)
     ap.add_argument("--max-findings", type=int, default=120)
     ap.add_argument("--reduce-batch-size", type=int, default=40)
+    ap.add_argument("--workers", type=int, default=4,
+                    help="Concurrent workers for MAP phase (default: 4)")
     ap.add_argument("--log-level", default="INFO")
     ap.add_argument("--start-at", default="candidates",
                     choices=["candidates", "map", "reduce", "draft"])
@@ -853,6 +884,7 @@ def main():
         max_candidates=args.max_candidates,
         max_findings=args.max_findings,
         reduce_batch_size=args.reduce_batch_size,
+        map_workers=args.workers,
         log_level=args.log_level,
     )
 

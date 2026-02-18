@@ -26,12 +26,14 @@ OUTLINE="docs/20260217ProjektabschlussberichtTFK18.pdf"
 MODEL="gpt-oss:latest"
 MAX_CANDIDATES=2000
 ES_INDEX="rag_tfk18_v1"
+WORKERS=4
 
 echo "============================================================"
 echo " Overnight Batch-Run: Schlussbericht TFK18"
 echo " Modell:          $MODEL"
 echo " Max Candidates:  $MAX_CANDIDATES"
 echo " ES Index:        $ES_INDEX"
+echo " Workers:         $WORKERS (concurrent)"
 echo " Outline:         $OUTLINE"
 echo " Output:          $RUN_DIR/"
 echo "============================================================"
@@ -68,6 +70,7 @@ python3 scripts/batch_report.py \
     --out "$RUN_DIR" \
     --max-findings 150 \
     --reduce-batch-size 40 \
+    --workers "$WORKERS" \
     --log-level INFO \
     2>&1 | tee "$LOGFILE"
 
