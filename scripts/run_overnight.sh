@@ -24,18 +24,20 @@ cd "$(dirname "$0")/.."
 RUN_DIR="runs"
 OUTLINE="docs/20260217ProjektabschlussberichtTFK18.pdf"
 MODEL="gpt-oss:latest"
+MAP_MODEL="qwen2.5:3b"
 MAX_CANDIDATES=2000
 ES_INDEX="rag_tfk18_v1"
 WORKERS=4
 
 echo "============================================================"
 echo " Overnight Batch-Run: Schlussbericht TFK18"
-echo " Modell:          $MODEL"
-echo " Max Candidates:  $MAX_CANDIDATES"
-echo " ES Index:        $ES_INDEX"
-echo " Workers:         $WORKERS (concurrent)"
-echo " Outline:         $OUTLINE"
-echo " Output:          $RUN_DIR/"
+echo " REDUCE/DRAFT Modell: $MODEL"
+echo " MAP Modell:          $MAP_MODEL"
+echo " Max Candidates:      $MAX_CANDIDATES"
+echo " ES Index:            $ES_INDEX"
+echo " Workers:             $WORKERS (concurrent)"
+echo " Outline:             $OUTLINE"
+echo " Output:              $RUN_DIR/"
 echo "============================================================"
 echo ""
 echo "Starte in 5 Sekunden... (Ctrl+C zum Abbrechen)"
@@ -64,12 +66,14 @@ echo ""
 # Vordergrund: live Output + Log-Datei (tee schreibt beides)
 python3 scripts/batch_report.py \
     --model "$MODEL" \
+    --map-model "$MAP_MODEL" \
     --es-index "$ES_INDEX" \
     --max-candidates "$MAX_CANDIDATES" \
     --outline "$OUTLINE" \
     --out "$RUN_DIR" \
     --max-findings 150 \
-    --reduce-batch-size 40 \
+    --reduce-batch-size 20 \
+    --timeout 1800 \
     --workers "$WORKERS" \
     --log-level INFO \
     2>&1 | tee "$LOGFILE"

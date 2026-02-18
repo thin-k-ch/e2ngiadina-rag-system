@@ -36,6 +36,7 @@ Requires: Python 3.10+, pip install requests pyyaml tqdm elasticsearch
 
 import os
 import re
+import sys
 import json
 import time
 import uuid
@@ -63,7 +64,7 @@ class Config:
     # Ollama
     ollama_base: str = "http://localhost:11434"
     ollama_model: str = "glm-4.7-flash:latest"
-    ollama_timeout_s: int = 600
+    ollama_timeout_s: int = 1800  # Base timeout; REDUCE/DRAFT get extra time dynamically
 
     # Elasticsearch
     es_url: str = "http://localhost:9200"
@@ -84,9 +85,10 @@ class Config:
     map_retry: int = 2
     map_sleep_s: float = 0.1
     map_workers: int = 4  # Concurrent Ollama requests for MAP phase
+    map_model: str = ""  # If set, use this model for MAP (e.g. qwen2.5:3b); otherwise use ollama_model
 
     # REDUCE phase
-    reduce_batch_size: int = 40   # Claims per hierarchical REDUCE batch
+    reduce_batch_size: int = 20   # Claims per hierarchical REDUCE batch (smaller = more reliable with large models)
     max_findings: int = 120
 
     # Verbosity
@@ -173,15 +175,21 @@ def count_jsonl(path: str) -> int:
 # ---------------------------------------------------------------------------
 
 def ollama_chat(cfg: Config, messages: List[Dict[str, str]],
-                temperature: float = 0.2, num_predict: int = 4096) -> str:
-    """Ollama /api/chat with dynamic num_ctx based on input size."""
+                temperature: float = 0.2, num_predict: int = 4096,
+                model_override: str = "") -> str:
+    """Ollama /api/chat with dynamic num_ctx and timeout based on input size."""
     url = cfg.ollama_base.rstrip("/") + "/api/chat"
     total_chars = sum(len(m.get("content", "")) for m in messages)
     num_ctx = max(4096, int(total_chars / 3) + num_predict + 512)
     num_ctx = min(num_ctx, 65536)
 
+    # Dynamic timeout: base + extra for large outputs (REDUCE/DRAFT need more)
+    timeout = cfg.ollama_timeout_s
+    if num_predict > 4096:
+        timeout = max(timeout, int(num_predict / 4) + 600)  # ~30min for 8K output
+
     payload = {
-        "model": cfg.ollama_model,
+        "model": model_override or cfg.ollama_model,
         "messages": messages,
         "stream": False,
         "options": {
@@ -190,7 +198,7 @@ def ollama_chat(cfg: Config, messages: List[Dict[str, str]],
             "num_predict": num_predict,
         }
     }
-    r = requests.post(url, json=payload, timeout=cfg.ollama_timeout_s)
+    r = requests.post(url, json=payload, timeout=timeout)
     r.raise_for_status()
     return r.json()["message"]["content"]
 
@@ -478,6 +486,7 @@ def _map_one_candidate(cfg: Config, cand: Dict[str, Any]) -> Tuple[str, Optional
                 ],
                 temperature=0.1,
                 num_predict=2048,
+                model_override=cfg.map_model,
             )
             obj = extract_json_from_text(raw)
             if not isinstance(obj, dict):
@@ -513,8 +522,9 @@ def step_map(cfg: Config, logger: logging.Logger, candidates_path: str) -> str:
     candidates = list(iter_jsonl(candidates_path))
     remaining = [c for c in candidates if c.get("doc_id", "") not in done_ids]
 
+    map_model_name = cfg.map_model or cfg.ollama_model
     logger.info(f"MAP: {len(candidates)} candidates, {len(done_ids)} already done, {len(remaining)} remaining")
-    logger.info(f"MAP workers: {cfg.map_workers} concurrent threads")
+    logger.info(f"MAP model: {map_model_name} | workers: {cfg.map_workers}")
 
     if not remaining:
         logger.info("[resume] MAP already complete")
@@ -579,16 +589,36 @@ def step_map(cfg: Config, logger: logging.Logger, candidates_path: str) -> str:
 
 REDUCE_SYSTEM = """Du bist ein Senior-Reviewer für Schlussberichte in Schweizer Infrastrukturprojekten.
 Du verdichtest Claims zu managementtauglichen Findings.
-Jedes Finding MUSS Evidenz-Referenzen enthalten (doc_id, path) und darf nichts erfinden.
-Antworte als JSON-Liste von Findings."""
+
+KRITISCHE REGELN:
+1. DEDUPLIZIERUNG: Wenn mehrere Claims dasselbe Thema beschreiben, fasse sie zu EINEM Finding zusammen.
+   NIEMALS zwei Findings mit demselben Kerninhalt erstellen.
+2. EVIDENZ-ZUORDNUNG: Jedes Finding MUSS die spezifischen Dokumente zitieren, aus denen es stammt.
+   Kopiere doc_id und path EXAKT aus den Claims. Erfinde KEINE Pfade.
+3. EIGENSTÄNDIGE FORMULIERUNG: Formuliere statement und recommendation in eigenen Worten als Synthese.
+   Kopiere NICHT einfach den Claim-Text. Verdichte und abstrahiere.
+4. KONKRETHEIT: Nenne konkrete Zahlen, Daten, Firmennamen wenn in Claims vorhanden.
+5. Antworte NUR als JSON-Liste. Kein Markdown, kein Kommentar davor oder danach."""
 
 REDUCE_USER_TEMPLATE = """Verdichte diese {n} Claims zu maximal {max_f} Findings.
 
-Regeln:
-- Gruppiere ähnliche/verwandte Claims
-- Pro Finding: title, category, impact, statement (2-4 Sätze), recommendation, evidence (Liste von doc_id+path+quote), confidence
-- Erfinde NICHTS – nur was in den Claims belegt ist
-- Deutsch
+SCHRITT 1 – GRUPPIEREN: Identifiziere thematische Cluster (z.B. alle Claims zu Abnahme, alle zu Kosten).
+SCHRITT 2 – DEDUPLIZIEREN: Claims mit gleichem Kerninhalt → EIN Finding. Zähle wie viele Claims zusammengefasst wurden.
+SCHRITT 3 – SYNTHETISIEREN: Formuliere pro Cluster ein eigenständiges Finding mit:
+  - title: Prägnanter Titel (max 10 Wörter), der das Kernthema benennt
+  - category: Genau EINE aus [Tech, Operations, Cost, Process, Management, Risk, Other]
+  - impact: Genau EINES aus [High, Med, Low]
+  - statement: 2-4 Sätze Synthese. Nenne konkrete Fakten (Zahlen, Daten, Namen) aus den Claims.
+  - recommendation: 1-2 Sätze konkrete Handlungsempfehlung. NICHT generisch.
+  - evidence: Liste mit doc_id + path + quote AUS DEN CLAIMS (nicht erfinden!)
+    → Nimm die VERSCHIEDENEN Dokumente aus den zusammengefassten Claims
+    → NICHT alle Evidenzen aus demselben Dokument
+  - confidence: Durchschnitt der Claim-Confidences (0.0-1.0)
+
+WICHTIG:
+- Jedes Finding muss Evidenz aus MINDESTENS 2 verschiedenen Dokumenten haben (wenn verfügbar)
+- Titel müssen EINZIGARTIG sein – keine zwei Findings mit gleichem/ähnlichem Titel
+- Generische Findings wie "Allgemeine Projektprobleme" vermeiden
 
 CLAIMS:
 {claims_json}
@@ -678,12 +708,19 @@ def step_reduce(cfg: Config, logger: logging.Logger, claims_path: str) -> str:
             compact_findings = compact_findings[:50000] + "\n..."
 
         merge_prompt = f"""Verdichte diese {len(all_intermediate)} Zwischen-Findings zu maximal {cfg.max_findings} finale Findings.
-Regeln: Gruppiere ähnliche, behalte Evidenz-Referenzen, Deutsch.
+
+REGELN:
+1. DEDUPLIZIERUNG hat höchste Priorität: Findings mit gleichem/ähnlichem Kernthema → zusammenfassen
+2. Evidenz-Referenzen aus ALLEN zusammengefassten Findings übernehmen (verschiedene Dokumente!)
+3. Statement eigenständig formulieren als Synthese aller zusammengefassten Findings
+4. Jedes finale Finding braucht: title, category, impact, statement, recommendation, evidence, confidence
+5. Titel müssen EINZIGARTIG sein
+6. Sprache: Deutsch
 
 ZWISCHEN-FINDINGS:
 {compact_findings}
 
-Antworte als JSON-Liste."""
+Antworte NUR als JSON-Liste."""
 
         try:
             raw = ollama_chat(
@@ -859,13 +896,72 @@ def parse_args():
     ap.add_argument("--candidates-file", default=None, help="JSONL mit vorbereiteten Candidates (statt ES-Suche)")
     ap.add_argument("--max-candidates", type=int, default=3000)
     ap.add_argument("--max-findings", type=int, default=120)
-    ap.add_argument("--reduce-batch-size", type=int, default=40)
+    ap.add_argument("--reduce-batch-size", type=int, default=20,
+                    help="Claims per REDUCE batch (default: 20, use smaller for large models)")
+    ap.add_argument("--timeout", type=int, default=1800,
+                    help="Base timeout in seconds for Ollama calls (default: 1800)")
+    ap.add_argument("--map-model", default="",
+                    help="Separate model for MAP phase (e.g. qwen2.5:3b). If empty, uses --model")
     ap.add_argument("--workers", type=int, default=4,
                     help="Concurrent workers for MAP phase (default: 4)")
     ap.add_argument("--log-level", default="INFO")
     ap.add_argument("--start-at", default="candidates",
                     choices=["candidates", "map", "reduce", "draft"])
     return ap.parse_args()
+
+
+def _log_quality(cfg: Config, logger: logging.Logger, phase: str):
+    """Run quality analysis after MAP or REDUCE and log key metrics."""
+    try:
+        from batch_quality import analyze_claims, analyze_findings
+    except ImportError:
+        # Try relative import
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, script_dir)
+        from batch_quality import analyze_claims, analyze_findings
+
+    logger.info(f"── Quality Check ({phase.upper()}) ──")
+    try:
+        if phase == "map":
+            metrics = analyze_claims(os.path.join(cfg.out_dir, "claims.jsonl"))
+            fc = metrics.get("field_completeness", {})
+            div = metrics.get("diversity", {})
+            conf = metrics.get("confidence", {})
+            logger.info(
+                f"  Claims: {metrics.get('total_claims',0)} | "
+                f"finding={fc.get('has_finding_pct',0)}% | "
+                f"evidence={fc.get('has_evidence_pct',0)}% | "
+                f"confidence={conf.get('avg',0):.2f}"
+            )
+            logger.info(
+                f"  Diversity: {div.get('unique_documents',0)} docs | "
+                f"{div.get('duplicate_pct',0)}% duplicates"
+            )
+        elif phase == "reduce":
+            metrics = analyze_findings(os.path.join(cfg.out_dir, "findings.json"))
+            fc = metrics.get("field_completeness", {})
+            eq = metrics.get("evidence_quality", {})
+            dup = metrics.get("duplicates", {})
+            logger.info(
+                f"  Findings: {metrics.get('total_findings',0)} | "
+                f"statement={fc.get('has_statement_pct',0)}% | "
+                f"evidence={fc.get('has_evidence_pct',0)}% | "
+                f"recommendation={fc.get('has_recommendation_pct',0)}%"
+            )
+            logger.info(
+                f"  Evidence: avg {eq.get('avg_evidence_per_finding',0)}/finding | "
+                f"{eq.get('unique_evidence_documents',0)} unique docs"
+            )
+            logger.info(
+                f"  Duplicates: titles={dup.get('duplicate_titles_pct',0)}% | "
+                f"statements={dup.get('duplicate_statements_pct',0)}%"
+            )
+        # Save full metrics
+        metrics_path = os.path.join(cfg.out_dir, f"quality_{phase}.json")
+        write_json(metrics_path, metrics)
+        logger.info(f"  Saved: {metrics_path}")
+    except Exception as e:
+        logger.warning(f"  Quality check failed: {e}")
 
 
 def main():
@@ -879,19 +975,25 @@ def main():
         out_dir=out_dir,
         ollama_base=args.ollama,
         ollama_model=args.model,
+        ollama_timeout_s=args.timeout,
         es_url=args.es_url,
         es_index=args.es_index,
         max_candidates=args.max_candidates,
         max_findings=args.max_findings,
         reduce_batch_size=args.reduce_batch_size,
+        map_model=args.map_model,
         map_workers=args.workers,
         log_level=args.log_level,
     )
 
     logger = setup_logger(out_dir, cfg.log_level)
+    map_model_display = cfg.map_model or cfg.ollama_model
     logger.info(f"{'='*60}")
     logger.info(f"RUN: {cfg.run_id}")
-    logger.info(f"Ollama: {cfg.ollama_base} | model={cfg.ollama_model}")
+    logger.info(f"Ollama: {cfg.ollama_base}")
+    logger.info(f"  REDUCE/DRAFT model: {cfg.ollama_model}")
+    logger.info(f"  MAP model:          {map_model_display}")
+    logger.info(f"  MAP workers:        {cfg.map_workers}")
     logger.info(f"ES: {cfg.es_url}/{cfg.es_index}")
     logger.info(f"Out: {cfg.out_dir}")
     logger.info(f"Max candidates: {cfg.max_candidates} | Max findings: {cfg.max_findings}")
@@ -901,6 +1003,8 @@ def main():
     write_json(os.path.join(out_dir, "config.json"), {
         "run_id": cfg.run_id,
         "model": cfg.ollama_model,
+        "map_model": cfg.map_model or cfg.ollama_model,
+        "map_workers": cfg.map_workers,
         "es_index": cfg.es_index,
         "max_candidates": cfg.max_candidates,
         "max_findings": cfg.max_findings,
@@ -933,11 +1037,13 @@ def main():
             if not os.path.exists(candidates_path) or count_jsonl(candidates_path) == 0:
                 candidates_path = step_candidates(cfg, logger, topics, args.candidates_file)
             claims_path = step_map(cfg, logger, candidates_path)
+            _log_quality(cfg, logger, "map")
         elif phase == "reduce":
             if not os.path.exists(claims_path) or count_jsonl(claims_path) == 0:
                 logger.error("No claims found. Run MAP phase first.")
                 break
             findings_path = step_reduce(cfg, logger, claims_path)
+            _log_quality(cfg, logger, "reduce")
         elif phase == "draft":
             if not os.path.exists(findings_path):
                 logger.error("No findings found. Run REDUCE phase first.")
