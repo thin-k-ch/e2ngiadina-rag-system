@@ -61,10 +61,12 @@ class Config:
     run_id: str
     out_dir: str
 
-    # Ollama
+    # LLM backend
+    backend: str = "ollama"  # "ollama" or "openai" (llama-server, vLLM, etc.)
     ollama_base: str = "http://localhost:11434"
     ollama_model: str = "glm-4.7-flash:latest"
     ollama_timeout_s: int = 1800  # Base timeout; REDUCE/DRAFT get extra time dynamically
+    openai_base: str = "http://localhost:8090"  # llama-server default
 
     # Elasticsearch
     es_url: str = "http://localhost:9200"
@@ -174,10 +176,31 @@ def count_jsonl(path: str) -> int:
 # Ollama client (/api/chat with dynamic num_ctx)
 # ---------------------------------------------------------------------------
 
+def openai_chat(cfg: Config, messages: List[Dict[str, str]],
+                temperature: float = 0.2, num_predict: int = 4096,
+                model_override: str = "") -> str:
+    """OpenAI-compatible /v1/chat/completions (llama-server, vLLM, etc.)."""
+    url = cfg.openai_base.rstrip("/") + "/v1/chat/completions"
+    timeout = cfg.ollama_timeout_s
+    if num_predict > 4096:
+        timeout = max(timeout, int(num_predict / 4) + 600)
+    payload = {
+        "model": model_override or cfg.ollama_model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": num_predict,
+    }
+    r = requests.post(url, json=payload, timeout=timeout)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
+
+
 def ollama_chat(cfg: Config, messages: List[Dict[str, str]],
                 temperature: float = 0.2, num_predict: int = 4096,
                 model_override: str = "") -> str:
     """Ollama /api/chat with dynamic num_ctx and timeout based on input size."""
+    if cfg.backend == "openai":
+        return openai_chat(cfg, messages, temperature, num_predict, model_override)
     url = cfg.ollama_base.rstrip("/") + "/api/chat"
     total_chars = sum(len(m.get("content", "")) for m in messages)
     num_ctx = max(4096, int(total_chars / 3) + num_predict + 512)
@@ -887,8 +910,12 @@ def parse_args():
     )
     ap.add_argument("--run-id", default=None, help="Run-ID (für Resume)")
     ap.add_argument("--out", default="runs", help="Basis-Ausgabeverzeichnis (default: runs/)")
-    ap.add_argument("--model", default="glm-4.7-flash:latest", help="Ollama Modell")
+    ap.add_argument("--model", default="glm-4.7-flash:latest", help="LLM model name")
+    ap.add_argument("--backend", default="ollama", choices=["ollama", "openai"],
+                    help="LLM backend: 'ollama' or 'openai' for llama-server/vLLM (default: ollama)")
     ap.add_argument("--ollama", default="http://localhost:11434", help="Ollama Base URL")
+    ap.add_argument("--openai-base", default="http://localhost:8090",
+                    help="OpenAI-compatible API base URL for llama-server/vLLM (default: http://localhost:8090)")
     ap.add_argument("--es-url", default="http://localhost:9200", help="Elasticsearch URL")
     ap.add_argument("--es-index", default="rag_tfk18_v1", help="ES Index")
     ap.add_argument("--topics", default=None, help="YAML mit Suchthemen (optional)")
@@ -973,7 +1000,9 @@ def main():
     cfg = Config(
         run_id=run_id,
         out_dir=out_dir,
+        backend=args.backend,
         ollama_base=args.ollama,
+        openai_base=args.openai_base,
         ollama_model=args.model,
         ollama_timeout_s=args.timeout,
         es_url=args.es_url,
