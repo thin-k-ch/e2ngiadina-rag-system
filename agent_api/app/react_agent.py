@@ -999,8 +999,23 @@ async def _execute_summarize_document(args: dict, tenant=None) -> str:
     ollama_base = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
     model = os.getenv("OLLAMA_MODEL_ANSWER", "llama4:latest")
     
+    # Check for GPU/OpenAI backend
+    from . import llm_client as _lc
+    _use_gpu = _lc.is_openai_answer()
+    if _use_gpu:
+        _gpu_cfg = _lc.get_answer_config()
+    
     async def _llm_call(messages: list, temperature: float = 0.2) -> str:
-        """Async LLM call to Ollama."""
+        """Async LLM call – routes to GPU (OpenAI) or Ollama."""
+        if _use_gpu:
+            return await _lc.complete_chat_openai(
+                base_url=_gpu_cfg["base_url"],
+                model=_gpu_cfg["model"] or model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=4096,
+                timeout=300.0,
+            )
         total = sum(len(m.get("content", "")) for m in messages)
         num_ctx = max(4096, int(total / 3) + 4096)
         num_ctx = min(num_ctx, 65536)
@@ -1265,6 +1280,18 @@ class ReactAgent:
         # Expose .model for backward compat (used in _stream_with_thinking etc.)
         self.model = self.model_answer
         self.ollama_base = (ollama_base or os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")).rstrip("/")
+        # GPU/OpenAI backend for answer model (llama-server, vLLM, etc.)
+        from . import llm_client
+        if llm_client.is_openai_answer():
+            acfg = llm_client.get_answer_config()
+            self._answer_backend = "openai"
+            self._answer_base_url = acfg["base_url"]
+            self._answer_model = acfg["model"] or self.model_answer
+            print(f"🚀 Answer via GPU: {self._answer_model} @ {self._answer_base_url}")
+        else:
+            self._answer_backend = "ollama"
+            self._answer_base_url = self.ollama_base
+            self._answer_model = self.model_answer
         self.max_steps = 6
         self.tenant = tenant  # TenantConfig or None
         # Check module-level cache + known prefixes for prompt-based tool calling
@@ -2257,6 +2284,45 @@ WICHTIG für answer_hint:
         num_ctx = max(4096, est_tokens + 8192 + 512)
         num_ctx = min(num_ctx, self.num_ctx_max)
         
+        timeout = 300.0
+        if total_chars > 20000:
+            timeout = 600.0
+        if self._use_prompt_tools_answer:
+            timeout = max(timeout, 600.0)
+        
+        # --- GPU/OpenAI backend path ---
+        if self._answer_backend == "openai":
+            from . import llm_client
+            print(f"🚀 ReAct stream (GPU): {total_chars} chars, timeout={timeout}s, model={self._answer_model}")
+            last_err = None
+            for attempt in range(2):
+                try:
+                    got_tokens = False
+                    async for token in llm_client.stream_chat_openai(
+                        base_url=self._answer_base_url,
+                        model=self._answer_model,
+                        messages=messages,
+                        temperature=0.3,
+                        max_tokens=8192,
+                        timeout=timeout,
+                    ):
+                        got_tokens = True
+                        yield token
+                    if got_tokens:
+                        return
+                except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadError) as e:
+                    last_err = e
+                    if attempt == 0:
+                        print(f"⚠️ GPU stream failed (attempt 1/2): {type(e).__name__}: {e}")
+                        timeout += 60.0
+                        import asyncio
+                        await asyncio.sleep(2)
+                    else:
+                        print(f"❌ GPU stream failed (attempt 2/2): {type(e).__name__}: {e}")
+                        raise LLMError(f"GPU-Streaming fehlgeschlagen nach 2 Versuchen: {type(last_err).__name__}")
+            return
+        
+        # --- Ollama backend path (original) ---
         # Remove tool_calls from messages for clean streaming
         # For prompt-based models: convert tool/tool_calls messages to plain text
         clean_messages = []
@@ -2264,10 +2330,8 @@ WICHTIG für answer_hint:
             role = m["role"]
             content = m.get("content", "")
             if role == "tool":
-                # Convert tool results to user message
                 clean_messages.append({"role": "user", "content": f"[Tool-Ergebnis]:\n{content}"})
             elif "tool_calls" in m:
-                # Convert tool_call to assistant text
                 tc = m.get("tool_calls", [{}])[0]
                 func = tc.get("function", {})
                 tc_name = func.get("name", "")
@@ -2276,7 +2340,6 @@ WICHTIG für answer_hint:
             else:
                 clean_messages.append({"role": role, "content": content})
         
-        # Final answer uses the answer model (big model for quality)
         answer_model = self.model_answer
         
         payload = {
@@ -2291,12 +2354,7 @@ WICHTIG für answer_hint:
             }
         }
         
-        timeout = 300.0
-        if total_chars > 20000:
-            timeout = 600.0
         # Reasoning models need much longer for first token (internal <think> phase)
-        if self._use_prompt_tools_answer:
-            timeout = max(timeout, 600.0)
         
         print(f"🔧 ReAct stream (answer): {total_chars} chars, num_ctx={num_ctx}, timeout={timeout}s, model={answer_model}")
         

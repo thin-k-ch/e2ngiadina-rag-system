@@ -36,6 +36,10 @@ services:
       - OLLAMA_MODEL_STRATEGY=qwen2.5:7b
       - OLLAMA_MODEL_ANSWER=llama4:latest
       - OLLAMA_MODEL_ANALYSIS=qwen2.5:3b
+      # GPU backend (llama-server on host)
+      - LLM_ANSWER_BACKEND=openai
+      - LLM_ANSWER_BASE_URL=http://host.docker.internal:8090
+      - LLM_ANSWER_MODEL=gpt-oss-120b
       # Embedding and other settings
       - EMBED_MODEL=all-MiniLM-L6-v2
       - ENABLE_DEBUG_ENDPOINTS=0
@@ -58,6 +62,8 @@ services:
       - CHROMA_HOST=localhost:8000
       - SEARXNG_URL=http://searxng:8080
       - MEMORY_PATH=/memories
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /media/felix/RAG/1/volumes/chroma:/chroma
       - /media/felix/RAG/1/volumes/logs:/logs

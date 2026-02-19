@@ -69,6 +69,17 @@ class RAGPipeline(ABC):
         self.ollama_base = (ollama_base or os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")).rstrip("/")
         self.model = model or os.getenv("OLLAMA_MODEL_ANSWER", "llama4:latest")
         self._tools = None
+        # GPU/OpenAI backend for answer model
+        from . import llm_client
+        if llm_client.is_openai_answer():
+            acfg = llm_client.get_answer_config()
+            self._answer_backend = "openai"
+            self._answer_base_url = acfg["base_url"]
+            self._answer_model = acfg["model"] or self.model
+        else:
+            self._answer_backend = "ollama"
+            self._answer_base_url = self.ollama_base
+            self._answer_model = self.model
     
     @property
     def tools(self):
@@ -354,18 +365,37 @@ Sei gründlich aber knapp. Antworte auf Deutsch."""
         Automatically calculates num_ctx based on input token estimate
         to prevent Ollama from truncating long inputs (e.g. transcripts).
         """
-        # Estimate input tokens (rough: ~4 chars per token for German/mixed text)
         total_chars = sum(len(m.get("content", "")) for m in messages)
-        est_input_tokens = total_chars // 3  # conservative estimate
+        est_input_tokens = total_chars // 3
         
-        # Dynamic context window: input tokens + output buffer + safety margin
+        # Dynamic timeout: longer for bigger inputs
+        base_timeout = 120.0
+        if total_chars > 20000:
+            base_timeout = 600.0
+        elif total_chars > 5000:
+            base_timeout = 300.0
+        
+        # --- GPU/OpenAI backend path ---
+        if self._answer_backend == "openai":
+            from . import llm_client
+            print(f"🚀 LLM stream (GPU): {total_chars} chars, timeout={base_timeout}s, model={self._answer_model}")
+            async for token in llm_client.stream_chat_openai(
+                base_url=self._answer_base_url,
+                model=self._answer_model,
+                messages=messages,
+                temperature=temperature if temperature is not None else 0.3,
+                max_tokens=num_predict or 8192,
+                timeout=base_timeout,
+            ):
+                yield token
+            return
+        
+        # --- Ollama backend path (original) ---
         output_buffer = num_predict or 8192
         min_ctx = 4096
         needed_ctx = est_input_tokens + output_buffer + 512
         num_ctx = max(min_ctx, needed_ctx)
-        
-        # Cap at reasonable limits per model
-        max_ctx = 131072  # 128K - safe for most models
+        max_ctx = 131072
         num_ctx = min(num_ctx, max_ctx)
         
         options = {"num_ctx": num_ctx}
@@ -380,13 +410,6 @@ Sei gründlich aber knapp. Antworte auf Deutsch."""
             "stream": True,
             "options": options
         }
-        
-        # Dynamic timeout: longer for bigger inputs
-        base_timeout = 120.0
-        if total_chars > 20000:
-            base_timeout = 600.0  # 10 min for long transcripts
-        elif total_chars > 5000:
-            base_timeout = 300.0  # 5 min for medium inputs
         
         print(f"🔧 LLM stream: {total_chars} chars ≈ {est_input_tokens} tokens, num_ctx={num_ctx}, timeout={base_timeout}s, model={self.model}")
         
@@ -413,6 +436,26 @@ Sei gründlich aber knapp. Antworte auf Deutsch."""
         """Non-streaming LLM call with dynamic context window sizing"""
         total_chars = sum(len(m.get("content", "")) for m in messages)
         est_input_tokens = total_chars // 3
+        
+        base_timeout = 60.0
+        if total_chars > 20000:
+            base_timeout = 300.0
+        elif total_chars > 5000:
+            base_timeout = 120.0
+        
+        # --- GPU/OpenAI backend path ---
+        if self._answer_backend == "openai":
+            from . import llm_client
+            return await llm_client.complete_chat_openai(
+                base_url=self._answer_base_url,
+                model=self._answer_model,
+                messages=messages,
+                temperature=temperature if temperature is not None else RAG_ANSWER_TEMPERATURE,
+                max_tokens=4096,
+                timeout=base_timeout,
+            )
+        
+        # --- Ollama backend path (original) ---
         num_ctx = max(4096, est_input_tokens + 8192 + 512)
         num_ctx = min(num_ctx, 131072)
         
@@ -425,12 +468,6 @@ Sei gründlich aber knapp. Antworte auf Deutsch."""
                 "num_ctx": num_ctx
             }
         }
-        
-        base_timeout = 60.0
-        if total_chars > 20000:
-            base_timeout = 300.0
-        elif total_chars > 5000:
-            base_timeout = 120.0
         
         import httpx
         async with httpx.AsyncClient(timeout=httpx.Timeout(base_timeout, connect=10.0)) as client:
