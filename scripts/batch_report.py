@@ -934,6 +934,9 @@ def parse_args():
     ap.add_argument("--log-level", default="INFO")
     ap.add_argument("--start-at", default="candidates",
                     choices=["candidates", "map", "reduce", "draft"])
+    ap.add_argument("--stop-after", default="draft",
+                    choices=["candidates", "map", "reduce", "draft"],
+                    help="Stop after this phase (default: draft = run all)")
     return ap.parse_args()
 
 
@@ -1053,8 +1056,9 @@ def main():
 
     phases = ["candidates", "map", "reduce", "draft"]
     start_idx = phases.index(args.start_at)
+    stop_idx = phases.index(args.stop_after)
 
-    for phase in phases[start_idx:]:
+    for phase in phases[start_idx:stop_idx + 1]:
         logger.info(f"\n{'─'*40}")
         logger.info(f"PHASE: {phase.upper()}")
         logger.info(f"{'─'*40}")

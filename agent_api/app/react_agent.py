@@ -314,7 +314,8 @@ KONTEXT-HIERARCHIE (bei Suchergebnissen):
 - Wenn beides vorliegt: Befunde bevorzugen, mit Originalquellen ergänzen
 
 ANTWORT-REGELN:
-- Antworte IMMER auf Deutsch, AUSFÜHRLICH und STRUKTURIERT (mindestens 200 Wörter bei Sachfragen)
+- Antworte IMMER auf Deutsch, AUSFÜHRLICH und STRUKTURIERT
+- WICHTIG UMFANG: Sachfragen erfordern MINDESTENS 300-500 Wörter. Gehe in die Tiefe! Erkläre Zusammenhänge, nenne Hintergründe, zeige Querverbindungen zwischen Dokumenten. Eine zu kurze Antwort ist SCHLECHTER als eine ausführliche.
 - Starte DIREKT mit der konkreten Antwort – KEINE Einleitungen ("Basierend auf...", "Gerne...", "Es scheint...")
 - ZITIERE exakte Textpassagen aus den Dokumenten in Anführungszeichen: "exakter Text" [Dateiname]
 - Nenne Seitenzahlen, Datumswerte, Kapitelnummern, konkrete Zahlen wenn verfügbar

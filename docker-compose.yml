@@ -197,9 +197,11 @@ services:
       - CHUNK_OVERLAP=200
       - RAG_RELEVANCE_THRESHOLD=0.0
       # Streaming & Timeout Optimierungen
-      - AIOHTTP_CLIENT_TIMEOUT=900
+      - AIOHTTP_CLIENT_TIMEOUT=1800
       - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=7
       - THREAD_POOL_SIZE=20
+    volumes:
+      - ./volumes/openwebui:/app/backend/data
     depends_on:
       - agent_api
       - ollama
