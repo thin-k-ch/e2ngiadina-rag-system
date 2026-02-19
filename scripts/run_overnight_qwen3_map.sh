@@ -17,7 +17,9 @@
 # Usage:
 #   nohup bash scripts/run_overnight_qwen3_map.sh > runs/overnight_qwen3.log 2>&1 &
 
-set -euo pipefail
+set -uo pipefail
+# NOTE: -e intentionally omitted — we handle errors per-phase to avoid
+# aborting the entire overnight run on partial failures.
 
 LLAMA_SERVER="/media/felix/RAG/llama.cpp/build/bin/llama-server"
 BATCH_SCRIPT="/media/felix/RAG/AGENTIC/scripts/batch_report.py"
@@ -49,9 +51,19 @@ kill_llama_server() {
 
 wait_for_server() {
     local max_wait=${1:-300}
+    local server_pid=${2:-0}
     local elapsed=0
     log "Waiting for llama-server on port ${PORT} (max ${max_wait}s)..."
-    while ! curl -s "http://localhost:${PORT}/health" | grep -q '"ok"' 2>/dev/null; do
+    while true; do
+        # Check if server process is still alive
+        if [ "$server_pid" -gt 0 ] && ! kill -0 "$server_pid" 2>/dev/null; then
+            log "ERROR: llama-server process ${server_pid} died during startup!"
+            return 1
+        fi
+        # Check health endpoint
+        if curl -s --max-time 5 "http://localhost:${PORT}/health" 2>/dev/null | grep -q 'ok'; then
+            break
+        fi
         sleep 5
         elapsed=$((elapsed + 5))
         if [ "$elapsed" -ge "$max_wait" ]; then
@@ -96,6 +108,13 @@ if [ ! -f "${QWEN3_GGUF}" ]; then
     exit 1
 fi
 
+# Cleanup trap: ensure llama-server is killed on script exit
+cleanup() {
+    log "Cleanup: stopping llama-server..."
+    kill_llama_server
+}
+trap cleanup EXIT
+
 # Unload Ollama models to free GPU memory
 unload_ollama_models
 
@@ -124,13 +143,18 @@ ${LLAMA_SERVER} \
 QWEN3_PID=$!
 log "llama-server PID: ${QWEN3_PID}"
 
-# Wait for Qwen3 to load (112GB model, may take 2-3 min)
-wait_for_server 600
+# Wait for Qwen3 to load (112GB model, may take 5+ min)
+if ! wait_for_server 600 "${QWEN3_PID}"; then
+    log "FATAL: Qwen3 llama-server failed to start. Check ${RUN_DIR}/${RUN_ID}_qwen3_server.log"
+    tail -20 "${RUN_DIR}/${RUN_ID}_qwen3_server.log" 2>/dev/null
+    exit 1
+fi
 
 # Run MAP phase only (candidates + map)
 log "Starting batch MAP phase..."
 MAP_START=$(date +%s)
 
+MAP_EXIT=0
 python3 "${BATCH_SCRIPT}" \
     --backend openai \
     --openai-base "http://localhost:${PORT}" \
@@ -143,20 +167,29 @@ python3 "${BATCH_SCRIPT}" \
     --start-at candidates \
     --stop-after map \
     --timeout 600 \
-    2>&1 | tee -a "${RUN_DIR}/${RUN_ID}_map.log"
+    2>&1 | tee -a "${RUN_DIR}/${RUN_ID}_map.log" || MAP_EXIT=$?
 
 MAP_END=$(date +%s)
 MAP_DURATION=$(( (MAP_END - MAP_START) / 60 ))
-log "MAP phase completed in ${MAP_DURATION} minutes"
 
-# Verify MAP output
+if [ "${MAP_EXIT}" -ne 0 ]; then
+    log "WARNING: MAP phase exited with code ${MAP_EXIT} after ${MAP_DURATION} min"
+    log "  Checking if partial claims were written..."
+else
+    log "MAP phase completed successfully in ${MAP_DURATION} minutes"
+fi
+
+# Verify MAP output — proceed even with partial results
 CLAIMS_FILE="${RUN_DIR}/${RUN_ID}/claims.jsonl"
-if [ ! -f "${CLAIMS_FILE}" ]; then
-    log "ERROR: No claims.jsonl found after MAP phase!"
+if [ ! -f "${CLAIMS_FILE}" ] || [ ! -s "${CLAIMS_FILE}" ]; then
+    log "FATAL: No claims.jsonl found after MAP phase — nothing to REDUCE."
     exit 1
 fi
 CLAIM_COUNT=$(wc -l < "${CLAIMS_FILE}")
 log "MAP produced ${CLAIM_COUNT} claims"
+if [ "${CLAIM_COUNT}" -lt 10 ]; then
+    log "WARNING: Only ${CLAIM_COUNT} claims — REDUCE may produce poor results"
+fi
 
 # =================================================================
 # PHASE 2: Switch to gpt-oss-120b for REDUCE + DRAFT
@@ -185,7 +218,11 @@ GPTOSS_PID=$!
 log "llama-server PID: ${GPTOSS_PID}"
 
 # Wait for gpt-oss-120b to load
-wait_for_server 300
+if ! wait_for_server 300 "${GPTOSS_PID}"; then
+    log "FATAL: gpt-oss-120b llama-server failed to start. Check ${RUN_DIR}/${RUN_ID}_gptoss_server.log"
+    tail -20 "${RUN_DIR}/${RUN_ID}_gptoss_server.log" 2>/dev/null
+    exit 1
+fi
 
 # Delete findings.json and report_suggestions.md to force re-run from REDUCE
 rm -f "${RUN_DIR}/${RUN_ID}/findings.json"
@@ -195,6 +232,7 @@ rm -f "${RUN_DIR}/${RUN_ID}/report_suggestions.md"
 log "Starting batch REDUCE+DRAFT phase..."
 REDUCE_START=$(date +%s)
 
+REDUCE_EXIT=0
 python3 "${BATCH_SCRIPT}" \
     --backend openai \
     --openai-base "http://localhost:${PORT}" \
@@ -208,11 +246,16 @@ python3 "${BATCH_SCRIPT}" \
     --out "${RUN_DIR}" \
     --start-at reduce \
     --timeout 1800 \
-    2>&1 | tee -a "${RUN_DIR}/${RUN_ID}_reduce_draft.log"
+    2>&1 | tee -a "${RUN_DIR}/${RUN_ID}_reduce_draft.log" || REDUCE_EXIT=$?
 
 REDUCE_END=$(date +%s)
 REDUCE_DURATION=$(( (REDUCE_END - REDUCE_START) / 60 ))
-log "REDUCE+DRAFT completed in ${REDUCE_DURATION} minutes"
+
+if [ "${REDUCE_EXIT}" -ne 0 ]; then
+    log "WARNING: REDUCE+DRAFT exited with code ${REDUCE_EXIT} after ${REDUCE_DURATION} min"
+else
+    log "REDUCE+DRAFT completed successfully in ${REDUCE_DURATION} minutes"
+fi
 
 # =================================================================
 # Summary

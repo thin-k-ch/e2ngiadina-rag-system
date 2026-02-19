@@ -229,6 +229,16 @@ def ollama_chat(cfg: Config, messages: List[Dict[str, str]],
 def extract_json_from_text(text: str) -> Optional[Any]:
     """Robustly extract JSON object or array from model output."""
     text = text.strip()
+    # Strip <think>...</think> blocks (Qwen3 MoE, DeepSeek-R1, etc.)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    # Handle unclosed <think> (truncated output): drop everything before last JSON
+    if "<think>" in text and "</think>" not in text:
+        # Find first { or [ after <think> block — likely the actual JSON
+        for ch in ["{", "["]:
+            idx = text.find(ch)
+            if idx != -1:
+                text = text[idx:]
+                break
     # Strategy 1: direct parse
     try:
         return json.loads(text)
