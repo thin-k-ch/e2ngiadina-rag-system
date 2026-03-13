@@ -141,5 +141,59 @@ def _safe_extract_queries(parsed, fallback_text: str) -> list[str]:
 5. **Documentation:** Update API documentation with streaming examples
 
 ---
-**Last Updated:** 2026-02-08 01:45 UTC
-**Status:** All services stable with llama4:latest and full streaming support
+
+## 📄 **ONEPAGER BATCH JOB — SBB-TFK COMPLETED (2026-03-13)**
+
+### Batch-Lauf
+- **Script**: `scripts/summarize_docs.py` — pre-compute OnePager + Erkenntnisse per document
+- **Modell**: gpt-oss-120b via llama-server (Port 8090, Docker container)
+- **ES-Index**: `rag_files_v1` (SBB-TFK Tenant)
+- **Output**: `runs/summaries_sbb_tfk/summaries.jsonl` (104 MB, 15150 Zeilen)
+- **Backup**: `runs/summaries_sbb_tfk/backup/` (SHA256 verifiziert)
+- **Ergebnis**: 15122 OK, 28 too_short, 0 Fehler, 52657 Erkenntnisse (Ø 3.5/doc)
+- **Laufzeit**: 226.8h (~9.5 Tage), 3. März 23:30 → 13. März 10:18
+
+### Chroma-Ingest
+- **KRITISCH**: Host chromadb=1.4.1, Container=0.5.7 → MUSS via Docker laden!
+- **Befehl**: `docker exec e2ngiadina-api python3 /tmp/load_onepagers_to_chroma.py --chroma-path /chroma/sbb-tfk --collection documents_onepagers /tmp/summaries_sbb_tfk.jsonl`
+- **Collection**: `documents_onepagers` → 15105 Dokumente
+- **Naming-Konvention**: `{chroma_prefix}_onepagers` — SBB-TFK prefix=`documents`, TFK18 prefix=`tfk18`
+
+### Search Integration (Commit c76d7ce)
+- `agent_api/app/tools.py`:
+  - `_init_chroma()`: OnePagers-Collection wird analog zu Findings initialisiert (graceful fallback)
+  - `search_chunks()`: OnePagers als 5. Collection in Hybrid-Suche
+- **Code nicht als Volume gemountet** → nach Änderung: `docker cp` + `docker restart`, ODER `docker compose build`
+- Verifiziert: `onepagers=✅` im Startup-Log
+
+### Tenant-Architektur (Docker Mounts)
+```
+Host                                    → Container
+/media/felix/RAG/1/volumes/chroma       → /chroma/sbb-tfk  (prefix=documents)
+/media/felix/RAG/TFK18/volumes/chroma   → /chroma/tfk18    (prefix=tfk18)
+```
+
+### Chroma Collections
+```
+SBB-TFK (/chroma/sbb-tfk):
+  documents:            47801  (PDF chunks)
+  documents_onepagers:  15105  (OnePager summaries) ← NEU
+  documents_mail_ews:    3860  (E-Mails)
+  rag_files_v1_chunks: 480711  (all chunks)
+
+TFK18 (/chroma/tfk18):
+  tfk18_documents:     383248  (all chunks)
+  tfk18_onepagers:      11332  (OnePager summaries)
+```
+
+### ES-Indices
+- `rag_files_v1` = SBB-TFK (62257 docs) — OnePagers NICHT in ES
+- `rag_tfk18_v1` = TFK18 (48545 docs) — OnePagers NICHT in ES
+
+### Bekannte Probleme
+- `tfk18_findings` (1094 docs) in SBB-TFK Chroma → Tenant-Vermischung, muss bereinigt werden
+- Tenant-Switch via X-Tenant-ID Header: Implementation in main.py vorhanden, Verifikation ausstehend
+
+---
+**Last Updated:** 2026-03-13 18:06 UTC
+**Status:** OnePager batch complete, search integrated, git pushed (c76d7ce)
