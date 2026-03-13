@@ -263,6 +263,67 @@
         </div>
       </div>
 
+      <!-- Suchstrategie -->
+      <div class="card md:col-span-2">
+        <div class="section-title">📄 Suchstrategie (OnePager)</div>
+        <p class="text-sm text-slate-400 mb-4">Bestimmt wie die strukturierten OnePager-Zusammenfassungen bei Suchanfragen gewichtet und eingesetzt werden.</p>
+        <div class="grid md:grid-cols-2 gap-4 mb-4">
+          <!-- Search Mode -->
+          <div>
+            <label class="text-sm text-slate-400 block mb-2">Suchmodus</label>
+            <div class="space-y-2">
+              <label class="flex items-start gap-3 cursor-pointer p-3 rounded-lg border-2 border-slate-600 has-[:checked]:border-blue-500 has-[:checked]:bg-blue-500/10">
+                <input type="radio" name="search-mode" value="full_search" id="cfg-mode-full" class="accent-blue-500 mt-0.5" onchange="updateSearchModeInfo(); saveConfig()">
+                <div>
+                  <div class="text-sm font-bold text-white">🔍 Vollsuche</div>
+                  <div class="text-xs text-slate-400">Alle Quellen gleichberechtigt: Dokument-Chunks + OnePager + E-Mails. OnePager werden per Boost-Faktor gewichtet.</div>
+                </div>
+              </label>
+              <label class="flex items-start gap-3 cursor-pointer p-3 rounded-lg border-2 border-slate-600 has-[:checked]:border-blue-500 has-[:checked]:bg-blue-500/10">
+                <input type="radio" name="search-mode" value="onepagers_first" id="cfg-mode-op-first" class="accent-blue-500 mt-0.5" onchange="updateSearchModeInfo(); saveConfig()">
+                <div>
+                  <div class="text-sm font-bold text-white">📄 OnePager zuerst</div>
+                  <div class="text-xs text-slate-400">Zwei-Phasen: Erst OnePager-Zusammenfassungen, dann Detail-Chunks aus relevanten Dokumenten nachladen.</div>
+                </div>
+              </label>
+              <label class="flex items-start gap-3 cursor-pointer p-3 rounded-lg border-2 border-slate-600 has-[:checked]:border-blue-500 has-[:checked]:bg-blue-500/10">
+                <input type="radio" name="search-mode" value="onepagers_only" id="cfg-mode-op-only" class="accent-blue-500 mt-0.5" onchange="updateSearchModeInfo(); saveConfig()">
+                <div>
+                  <div class="text-sm font-bold text-white">📋 Nur OnePager</div>
+                  <div class="text-xs text-slate-400">Ausschliesslich OnePager-Zusammenfassungen. Schnell, kompakt — ideal für Übersichtsfragen.</div>
+                </div>
+              </label>
+            </div>
+          </div>
+          <!-- Boost Slider -->
+          <div>
+            <label class="text-sm text-slate-400 block mb-2">OnePager-Gewichtung</label>
+            <div class="p-4 rounded-lg bg-slate-800 border border-slate-600">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-xs text-slate-400">Schwach</span>
+                <span class="text-sm font-bold text-white" id="boost-value">0.70</span>
+                <span class="text-xs text-slate-400">Stark</span>
+              </div>
+              <input type="range" id="cfg-onepager-boost" min="30" max="100" step="5" value="70" class="w-full accent-blue-500" oninput="updateBoostLabel(this.value)" onchange="saveConfig()">
+              <p class="text-xs text-slate-400 mt-3" id="boost-desc">Distanz-Multiplikator: OnePager-Treffer werden um 30% näher gewichtet.</p>
+              <div class="mt-3 p-2 rounded bg-slate-900 text-xs text-slate-500">
+                <strong>Beispiel:</strong> Bei Boost 0.70 rutscht ein OnePager mit Distanz 0.8 auf effektive 0.56 — gleichauf mit einem Rohchunk bei 0.56.
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- Active Mode Info -->
+        <div class="p-3 rounded-lg border border-blue-600/30 bg-blue-950/20" id="search-mode-info">
+          <div class="flex items-center gap-2">
+            <span class="text-lg" id="search-mode-icon">🔍</span>
+            <div>
+              <span class="text-sm font-bold text-blue-300" id="search-mode-label">Vollsuche aktiv</span>
+              <p class="text-xs text-slate-400" id="search-mode-desc">Alle Collections werden durchsucht, OnePager mit Boost gewichtet.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Performance -->
       <div class="card">
         <div class="section-title">⚡ Performance</div>
@@ -442,6 +503,15 @@ async function loadDashboard() {
     document.getElementById('cfg-exec-python').checked = config.execute_python_enabled !== false;
     document.getElementById('cfg-reranker').checked = config.reranker_enabled !== false;
     updateSecurityLevel();
+    // Search strategy
+    const searchMode = config.search_mode || 'full_search';
+    document.getElementById('cfg-mode-full').checked = (searchMode === 'full_search');
+    document.getElementById('cfg-mode-op-first').checked = (searchMode === 'onepagers_first');
+    document.getElementById('cfg-mode-op-only').checked = (searchMode === 'onepagers_only');
+    const boostVal = Math.round((config.onepager_boost || 0.7) * 100);
+    document.getElementById('cfg-onepager-boost').value = boostVal;
+    updateBoostLabel(boostVal);
+    updateSearchModeInfo();
   }
 
   // Load memories for active tenant
@@ -517,6 +587,8 @@ async function saveConfig() {
     web_search_enabled: document.getElementById('cfg-web-search').checked,
     execute_python_enabled: document.getElementById('cfg-exec-python').checked,
     reranker_enabled: document.getElementById('cfg-reranker').checked,
+    search_mode: document.querySelector('input[name="search-mode"]:checked')?.value || 'full_search',
+    onepager_boost: parseInt(document.getElementById('cfg-onepager-boost').value) / 100,
   };
   const r = await api('/admin/api/config', {
     method: 'POST',
@@ -535,6 +607,38 @@ async function saveConfig() {
     updateSecurityLevel();
   } else {
     toast('Fehler beim Speichern', false);
+  }
+}
+
+// --- Search Strategy Helpers ---
+function updateBoostLabel(val) {
+  const boost = (val / 100).toFixed(2);
+  document.getElementById('boost-value').textContent = boost;
+  const pct = 100 - val;
+  document.getElementById('boost-desc').textContent = `Distanz-Multiplikator: OnePager-Treffer werden um ${pct}% näher gewichtet.`;
+}
+
+function updateSearchModeInfo() {
+  const mode = document.querySelector('input[name="search-mode"]:checked')?.value || 'full_search';
+  const icon = document.getElementById('search-mode-icon');
+  const label = document.getElementById('search-mode-label');
+  const desc = document.getElementById('search-mode-desc');
+  const boostSection = document.getElementById('cfg-onepager-boost').closest('.p-4');
+  if (mode === 'full_search') {
+    icon.textContent = '🔍';
+    label.textContent = 'Vollsuche aktiv';
+    desc.textContent = 'Alle Collections werden durchsucht, OnePager mit Boost gewichtet.';
+    boostSection.style.opacity = '1';
+  } else if (mode === 'onepagers_first') {
+    icon.textContent = '📄';
+    label.textContent = 'OnePager zuerst';
+    desc.textContent = 'Erst Zusammenfassungen, dann Detail-Chunks aus relevanten Dokumenten.';
+    boostSection.style.opacity = '1';
+  } else {
+    icon.textContent = '📋';
+    label.textContent = 'Nur OnePager';
+    desc.textContent = 'Ausschliesslich OnePager-Zusammenfassungen. Kein Boost nötig.';
+    boostSection.style.opacity = '0.4';
   }
 }
 

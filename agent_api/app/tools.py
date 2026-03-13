@@ -296,24 +296,28 @@ class Tools:
         """
         Hybrid search: ES BM25 + Chroma vector. Merge+dedup. Optional fuzzy rerank AFTER merge.
         """
-        print(f"🔍 HYBRID SEARCH: {query}")
+        search_mode, _ = self._get_search_config()
+        print(f"🔍 HYBRID SEARCH: {query} [mode={search_mode}]")
         
         idxs = indices or RAG_FILES_INDICES
 
-        # ES BM25
-        es_resp_raw = self.es.es_bm25_search_content(query, indices=idxs, size=es_size, ext_filter=ext_filter)
-        # Convert ObjectApiResponse to dict
-        es_resp = dict(es_resp_raw) if hasattr(es_resp_raw, '__iter__') else {}
-        es_hits, es_total = self._es_to_hits(es_resp, exact_level="bm25")
-        print(f"📊 ES BM25: {es_total} hits")
+        # ES BM25 (skip in onepagers_only mode)
+        if search_mode == "onepagers_only":
+            es_hits, es_total = [], 0
+            print(f"📊 ES BM25: skipped (onepagers_only)")
+        else:
+            es_resp_raw = self.es.es_bm25_search_content(query, indices=idxs, size=es_size, ext_filter=ext_filter)
+            # Convert ObjectApiResponse to dict
+            es_resp = dict(es_resp_raw) if hasattr(es_resp_raw, '__iter__') else {}
+            es_hits, es_total = self._es_to_hits(es_resp, exact_level="bm25")
+            print(f"📊 ES BM25: {es_total} hits")
 
         # Chroma multi-query (optional)
         cq = chroma_queries or [query]
         chroma_all = []
         for q in cq:
-            # Use existing chroma search
             chroma_all.extend(self.search_chunks(q, top_k=chroma_k))
-        print(f"📊 CHROMA: {len(chroma_all)} hits")
+        print(f"📊 CHROMA: {len(chroma_all)} hits [mode={search_mode}]")
 
         merged = self._dedup_merge(es_hits, chroma_all)
 
@@ -347,61 +351,135 @@ class Tools:
             return False
         return round_idx >= STOP["max_rounds"]  # after rewrite/fallback round
 
-    # Keep existing methods for compatibility
-    def search_chunks(self, query: str, top_k: int | None = None):
-        k = top_k or self.top_k
-        emb = self.embedder.encode(query, convert_to_tensor=False).tolist()
-        
-        # Suche in allen Collections (PDFs, DOCXs, TXTs, MSGs, OnePagers)
-        res_pdf = self.chroma.search(emb, top_k=k)
-        res_docx = self.chroma_docx.search(emb, top_k=k)
-        res_txt = self.chroma_txt.search(emb, top_k=k)
-        res_msg = self.chroma_msg.search(emb, top_k=k)
-        res_op = self.chroma_onepagers.search(emb, top_k=k) if self._has_onepagers else {}
-        
-        # Ergebnisse kombinieren
-        docs = (res_pdf.get("documents", [[]])[0] + 
-                res_docx.get("documents", [[]])[0] + 
-                res_txt.get("documents", [[]])[0] + 
-                res_msg.get("documents", [[]])[0] +
-                res_op.get("documents", [[]])[0])
-        metas = (res_pdf.get("metadatas", [[]])[0] + 
-                 res_docx.get("metadatas", [[]])[0] + 
-                 res_txt.get("metadatas", [[]])[0] + 
-                 res_msg.get("metadatas", [[]])[0] +
-                 res_op.get("metadatas", [[]])[0])
-        ids = (res_pdf.get("ids", [[]])[0] + 
-               res_docx.get("ids", [[]])[0] + 
-               res_txt.get("ids", [[]])[0] + 
-               res_msg.get("ids", [[]])[0] +
-               res_op.get("ids", [[]])[0])
-        dists = (res_pdf.get("distances", [[]])[0] + 
-                 res_docx.get("distances", [[]])[0] + 
-                 res_txt.get("distances", [[]])[0] + 
-                 res_msg.get("distances", [[]])[0] +
-                 res_op.get("distances", [[]])[0])
-        
-        # Nach Distanz sortieren (bessere Ergebnisse zuerst)
-        combined = list(zip(docs, metas, ids, dists))
-        combined.sort(key=lambda x: x[3] if x[3] is not None else 1.0)
-        
+    def _get_search_config(self):
+        """Read search_mode and onepager_boost from RuntimeConfig."""
+        try:
+            from .runtime_config import get_runtime_config
+            cfg = get_runtime_config()
+            mode = cfg.get("search_mode", "full_search")
+            boost = float(cfg.get("onepager_boost", 0.7))
+            return mode, max(0.3, min(1.0, boost))
+        except Exception:
+            return "full_search", 0.7
+
+    def _collect_results(self, *result_sets):
+        """Merge multiple Chroma search results into flat lists."""
+        docs, metas, ids, dists = [], [], [], []
+        for res in result_sets:
+            if not res:
+                continue
+            docs.extend(res.get("documents", [[]])[0])
+            metas.extend(res.get("metadatas", [[]])[0])
+            ids.extend(res.get("ids", [[]])[0])
+            dists.extend(res.get("distances", [[]])[0])
+        return docs, metas, ids, dists
+
+    def _to_legacy_hits(self, combined, k, source_tag="chroma"):
+        """Convert (doc, meta, id, dist) tuples to legacy format."""
         out = []
-        for i, (doc, meta, id_val, dist) in enumerate(combined[:k]):
-            # Convert Chroma format to legacy format expected by _build_sources
+        for doc, meta, id_val, dist in combined[:k]:
             path = (meta.get("original_path") or meta.get("file_path") or meta.get("path") or "") if meta else ""
             filename = (meta.get("filename") or meta.get("file", {}).get("filename") or "") if meta else ""
+            is_onepager = (meta or {}).get("source_type") == "onepager"
             out.append({
                 "id": id_val,
                 "distance": dist,
                 "text": doc,
                 "metadata": meta,
-                # Legacy format fields for _build_sources
                 "file": {"path": path, "filename": filename},
                 "snippet": doc[:500] if doc else "",
-                "score": 1.0 - (dist if dist else 0.0),  # Convert distance to score
-                "source": "chroma",
+                "score": 1.0 - (dist if dist else 0.0),
+                "source": source_tag,
+                "is_onepager": is_onepager,
             })
         return out
+
+    # Keep existing methods for compatibility
+    def search_chunks(self, query: str, top_k: int | None = None):
+        k = top_k or self.top_k
+        search_mode, boost = self._get_search_config()
+        emb = self.embedder.encode(query, convert_to_tensor=False).tolist()
+
+        if search_mode == "onepagers_only":
+            return self._search_onepagers_only(emb, k)
+        elif search_mode == "onepagers_first":
+            return self._search_onepagers_first(emb, k, boost)
+        else:
+            return self._search_full(emb, k, boost)
+
+    def _search_full(self, emb, k, boost):
+        """Full search: all collections, OnePager hits boosted by distance multiplier."""
+        res_pdf = self.chroma.search(emb, top_k=k)
+        res_docx = self.chroma_docx.search(emb, top_k=k)
+        res_txt = self.chroma_txt.search(emb, top_k=k)
+        res_msg = self.chroma_msg.search(emb, top_k=k)
+        res_op = self.chroma_onepagers.search(emb, top_k=k) if self._has_onepagers else {}
+
+        docs, metas, ids, dists = self._collect_results(res_pdf, res_docx, res_txt, res_msg)
+        op_docs, op_metas, op_ids, op_dists = self._collect_results(res_op)
+
+        # Apply boost to OnePager distances (lower distance = higher rank)
+        op_dists_boosted = [d * boost if d is not None else 1.0 for d in op_dists]
+
+        all_docs = docs + op_docs
+        all_metas = metas + op_metas
+        all_ids = ids + op_ids
+        all_dists = dists + op_dists_boosted
+
+        combined = list(zip(all_docs, all_metas, all_ids, all_dists))
+        combined.sort(key=lambda x: x[3] if x[3] is not None else 1.0)
+        return self._to_legacy_hits(combined, k)
+
+    def _search_onepagers_only(self, emb, k):
+        """Only search OnePager summaries."""
+        if not self._has_onepagers:
+            return []
+        res_op = self.chroma_onepagers.search(emb, top_k=k)
+        docs, metas, ids, dists = self._collect_results(res_op)
+        combined = list(zip(docs, metas, ids, dists))
+        combined.sort(key=lambda x: x[3] if x[3] is not None else 1.0)
+        return self._to_legacy_hits(combined, k, source_tag="onepager")
+
+    def _search_onepagers_first(self, emb, k, boost):
+        """Two-phase: OnePagers first, then detail chunks from relevant documents."""
+        # Phase 1: Search OnePagers
+        if self._has_onepagers:
+            res_op = self.chroma_onepagers.search(emb, top_k=k)
+            op_docs, op_metas, op_ids, op_dists = self._collect_results(res_op)
+        else:
+            op_docs, op_metas, op_ids, op_dists = [], [], [], []
+
+        # Phase 2: Search raw document chunks
+        res_pdf = self.chroma.search(emb, top_k=k)
+        res_docx = self.chroma_docx.search(emb, top_k=k)
+        res_txt = self.chroma_txt.search(emb, top_k=k)
+        res_msg = self.chroma_msg.search(emb, top_k=k)
+        raw_docs, raw_metas, raw_ids, raw_dists = self._collect_results(res_pdf, res_docx, res_txt, res_msg)
+
+        # Boost OnePager distances
+        op_dists_boosted = [d * boost if d is not None else 1.0 for d in op_dists]
+
+        # Combine: OnePagers (boosted) + raw chunks
+        all_docs = op_docs + raw_docs
+        all_metas = op_metas + raw_metas
+        all_ids = op_ids + raw_ids
+        all_dists = op_dists_boosted + raw_dists
+
+        combined = list(zip(all_docs, all_metas, all_ids, all_dists))
+        combined.sort(key=lambda x: x[3] if x[3] is not None else 1.0)
+
+        # Ensure at least half the results are OnePagers (if available)
+        op_count = sum(1 for _, m, _, _ in combined[:k] if (m or {}).get("source_type") == "onepager")
+        if op_count < k // 2 and len(op_docs) >= k // 2:
+            # Force top OnePagers into results
+            op_combined = list(zip(op_docs, op_metas, op_ids, op_dists_boosted))
+            op_combined.sort(key=lambda x: x[3] if x[3] is not None else 1.0)
+            raw_combined = list(zip(raw_docs, raw_metas, raw_ids, raw_dists))
+            raw_combined.sort(key=lambda x: x[3] if x[3] is not None else 1.0)
+            combined = op_combined[:k // 2] + raw_combined[:k - k // 2]
+            combined.sort(key=lambda x: x[3] if x[3] is not None else 1.0)
+
+        return self._to_legacy_hits(combined, k)
 
     async def python_exec(self, code: str, locals: dict | None = None):
         async with httpx.AsyncClient(timeout=30) as client:

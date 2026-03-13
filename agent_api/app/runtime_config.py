@@ -27,6 +27,9 @@ class RuntimeConfig:
         "web_search_enabled": True,  # Allow web_search tool (SearXNG/Brave/Serper)
         "execute_python_enabled": True,  # Allow execute_python tool (sandbox)
         "reranker_enabled": True,  # Cross-encoder reranking after hybrid search
+        # Search strategy: how OnePager summaries are weighted
+        "search_mode": "full_search",  # "full_search" | "onepagers_first" | "onepagers_only"
+        "onepager_boost": 0.7,  # Distance multiplier for OnePager hits (lower = stronger boost, range 0.3–1.0)
     }
 
     def __init__(self, path: str = None):
