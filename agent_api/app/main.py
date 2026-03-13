@@ -460,6 +460,7 @@ async def ollama_chat(request: Request, x_tenant_id: str | None = Header(default
     
     # Route through ReAct Agent
     tenant = tenant_mgr.get_for_request(x_tenant_id)
+    _apply_tenant_to_tools(tenant)
     print(f"🤖 Ollama /api/chat → ReAct: model={selected_model}, tenant={tenant.short_name}")
     
     # Build chat history (all messages except last user message)
@@ -771,11 +772,21 @@ async def list_tenants():
     """List all available tenants and which one is active"""
     return {"tenants": tenant_mgr.list_tenants()}
 
+def _apply_tenant_to_tools(tenant):
+    """Reconfigure all Tools instances to use the given tenant's Chroma path/prefix."""
+    if tenant and hasattr(tenant, 'chroma_path'):
+        try:
+            if simple_rag._tools is not None:
+                simple_rag._tools.configure_for_tenant(tenant.chroma_path, tenant.chroma_prefix)
+        except Exception as e:
+            print(f"⚠️ Tools reconfigure error: {e}")
+
 @app.post("/tenants/switch/{short_name}")
 async def switch_tenant(short_name: str):
     """Switch the active tenant"""
     if tenant_mgr.set_active(short_name):
         t = tenant_mgr.active
+        _apply_tenant_to_tools(t)
         return {"status": "ok", "active": t.short_name, "name": t.name}
     available = [t["short_name"] for t in tenant_mgr.list_tenants()]
     raise HTTPException(404, f"Mandant '{short_name}' nicht gefunden. Verfügbar: {available}")
@@ -1312,6 +1323,7 @@ Aufgabe: {user_text}"""
                 if True:  # All models go through ReAct Agent
                     # Resolve tenant for this request
                     tenant = tenant_mgr.get_for_request(x_tenant_id)
+                    _apply_tenant_to_tools(tenant)
                     print(f"🤖 ReAct Agent mode: model={selected_model}, tenant={tenant.short_name}")
                     
                     # Build chat history

@@ -17,6 +17,9 @@ es_index: "rag_files_v1"
 # Erzeugt Collections: documents, documents_docx, documents_txt, documents_msg, documents_mail
 chroma_prefix: "documents"
 
+# ChromaDB Pfad (im Container)
+chroma_path: "/chroma/sbb-tfk"
+
 # Domain-spezifischer System-Prompt (wird an ReAct-Prompt angehängt)
 system_prompt_extra: |
   Du bist Spezialist für Schweizer Eisenbahn-Projekte (SBB TFK 2020 - Tunnelfunk).

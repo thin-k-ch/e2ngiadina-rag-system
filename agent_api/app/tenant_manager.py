@@ -23,6 +23,7 @@ class TenantConfig:
     document_root: str
     es_index: str
     chroma_prefix: str
+    chroma_path: str = "/chroma"
     system_prompt_extra: str = ""
     glossary: Dict[str, str] = field(default_factory=dict)
     transcript_corrections: Dict[str, str] = field(default_factory=dict)
@@ -113,6 +114,7 @@ class TenantManager:
             document_root=data["document_root"],
             es_index=data["es_index"],
             chroma_prefix=data["chroma_prefix"],
+            chroma_path=data.get("chroma_path", "/chroma"),
             system_prompt_extra=data.get("system_prompt_extra", ""),
             glossary=data.get("glossary", {}),
             transcript_corrections=data.get("transcript_corrections", {}),

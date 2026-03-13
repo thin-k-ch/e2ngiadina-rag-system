@@ -26,34 +26,68 @@ class Gate:
 class Tools:
     def __init__(self):
         self.embed_model_name = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
-        self.chroma_path = os.getenv("CHROMA_PATH", "/chroma")
-        self.collection = os.getenv("COLLECTION", "documents")
-        self.collection_docx = os.getenv("COLLECTION_DOCX", "documents_docx")
-        self.collection_txt = os.getenv("COLLECTION_TXT", "documents_txt")
-        self.collection_msg = os.getenv("COLLECTION_MSG", "documents_msg")
-        self.collection_mail = os.getenv("COLLECTION_MAIL_EWS", "documents_mail_ews")
         self.top_k = int(os.getenv("TOP_K", "10"))
         self.runner_url = os.getenv("PYRUNNER_URL", "http://runner:9000/run")
         self.embedder = SentenceTransformer(self.embed_model_name)
-        self.chroma = ChromaClient(self.chroma_path, self.collection)
-        self.chroma_docx = ChromaClient(self.chroma_path, self.collection_docx)
-        self.chroma_txt = ChromaClient(self.chroma_path, self.collection_txt)
-        self.chroma_msg = ChromaClient(self.chroma_path, self.collection_msg)
-        self.chroma_mail = ChromaClient(self.chroma_path, self.collection_mail)
-        # Pre-computed findings collection (loaded via load_findings_to_chroma.py)
-        self._findings_collection = os.getenv("COLLECTION_FINDINGS", "tfk18_findings")
+        self.es = ESTools()
+        # Current tenant state
+        self._current_chroma_path = None
+        self._current_chroma_prefix = None
+        # Init Chroma with defaults (will be overridden by configure_for_tenant)
+        self._init_chroma(
+            os.getenv("CHROMA_PATH", "/chroma"),
+            os.getenv("COLLECTION", "documents"),
+        )
+
+    def _init_chroma(self, chroma_path: str, prefix: str):
+        """(Re-)initialize all ChromaDB clients for a given path and collection prefix."""
+        self._current_chroma_path = chroma_path
+        self._current_chroma_prefix = prefix
+        self.chroma_path = chroma_path
+        self.collection = prefix
+        self.collection_docx = f"{prefix}_docx"
+        self.collection_txt = f"{prefix}_txt"
+        self.collection_msg = f"{prefix}_msg"
+        self.collection_mail = f"{prefix}_mail_ews"
+        self.chroma = ChromaClient(chroma_path, self.collection)
+        self.chroma_docx = ChromaClient(chroma_path, self.collection_docx)
+        self.chroma_txt = ChromaClient(chroma_path, self.collection_txt)
+        self.chroma_msg = ChromaClient(chroma_path, self.collection_msg)
+        self.chroma_mail = ChromaClient(chroma_path, self.collection_mail)
+        # OnePagers collection (tenant-specific naming: {prefix}_onepagers)
+        onepagers_name = f"{prefix}_onepagers"
         try:
-            self.chroma_findings = ChromaClient(self.chroma_path, self._findings_collection)
+            self.chroma_onepagers = ChromaClient(chroma_path, onepagers_name)
+            _oc = self.chroma_onepagers.collection.count()
+            if _oc > 0:
+                print(f"📄 OnePagers collection '{onepagers_name}': {_oc} entries")
+                self._has_onepagers = True
+            else:
+                self._has_onepagers = False
+        except Exception:
+            self.chroma_onepagers = None
+            self._has_onepagers = False
+        # Findings collection (tenant-specific naming: {prefix}_findings)
+        findings_name = f"{prefix}_findings"
+        try:
+            self.chroma_findings = ChromaClient(chroma_path, findings_name)
             _fc = self.chroma_findings.collection.count()
             if _fc > 0:
-                print(f"📋 Findings collection '{self._findings_collection}': {_fc} entries")
+                print(f"📋 Findings collection '{findings_name}': {_fc} entries")
                 self._has_findings = True
             else:
                 self._has_findings = False
         except Exception:
             self.chroma_findings = None
             self._has_findings = False
-        self.es = ESTools()
+        print(f"🗄️ Chroma: path={chroma_path}, prefix={prefix}, onepagers={'✅' if self._has_onepagers else '❌'}, findings={'✅' if self._has_findings else '❌'}")
+
+    def configure_for_tenant(self, chroma_path: str, prefix: str):
+        """Switch Chroma to a different tenant. Skips if already on the same tenant."""
+        if chroma_path == self._current_chroma_path and prefix == self._current_chroma_prefix:
+            return
+        print(f"🔄 Tools: Switching Chroma → path={chroma_path}, prefix={prefix}")
+        self._init_chroma(chroma_path, prefix)
 
     def search_findings(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Search pre-computed findings collection. Returns list of finding dicts."""
@@ -318,29 +352,34 @@ class Tools:
         k = top_k or self.top_k
         emb = self.embedder.encode(query, convert_to_tensor=False).tolist()
         
-        # Suche in allen Collections (PDFs, DOCXs, TXTs, MSGs)
+        # Suche in allen Collections (PDFs, DOCXs, TXTs, MSGs, OnePagers)
         res_pdf = self.chroma.search(emb, top_k=k)
         res_docx = self.chroma_docx.search(emb, top_k=k)
         res_txt = self.chroma_txt.search(emb, top_k=k)
         res_msg = self.chroma_msg.search(emb, top_k=k)
+        res_op = self.chroma_onepagers.search(emb, top_k=k) if self._has_onepagers else {}
         
         # Ergebnisse kombinieren
         docs = (res_pdf.get("documents", [[]])[0] + 
                 res_docx.get("documents", [[]])[0] + 
                 res_txt.get("documents", [[]])[0] + 
-                res_msg.get("documents", [[]])[0])
+                res_msg.get("documents", [[]])[0] +
+                res_op.get("documents", [[]])[0])
         metas = (res_pdf.get("metadatas", [[]])[0] + 
                  res_docx.get("metadatas", [[]])[0] + 
                  res_txt.get("metadatas", [[]])[0] + 
-                 res_msg.get("metadatas", [[]])[0])
+                 res_msg.get("metadatas", [[]])[0] +
+                 res_op.get("metadatas", [[]])[0])
         ids = (res_pdf.get("ids", [[]])[0] + 
                res_docx.get("ids", [[]])[0] + 
                res_txt.get("ids", [[]])[0] + 
-               res_msg.get("ids", [[]])[0])
+               res_msg.get("ids", [[]])[0] +
+               res_op.get("ids", [[]])[0])
         dists = (res_pdf.get("distances", [[]])[0] + 
                  res_docx.get("distances", [[]])[0] + 
                  res_txt.get("distances", [[]])[0] + 
-                 res_msg.get("distances", [[]])[0])
+                 res_msg.get("distances", [[]])[0] +
+                 res_op.get("distances", [[]])[0])
         
         # Nach Distanz sortieren (bessere Ergebnisse zuerst)
         combined = list(zip(docs, metas, ids, dists))
