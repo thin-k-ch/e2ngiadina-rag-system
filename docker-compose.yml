@@ -190,8 +190,8 @@ services:
       # User Management
       - DEFAULT_USER_ROLE=admin
       - ENABLE_SIGNUP=true
-      - ENABLE_LOGIN=true
-      - WEBUI_AUTH=True
+      - ENABLE_LOGIN=false
+      - WEBUI_AUTH=false
       - ENABLE_PERSISTENT_CONFIG=False
       # RAG Settings (für File-Upload: möglichst viel Kontext senden)
       - RAG_TOP_K=50
