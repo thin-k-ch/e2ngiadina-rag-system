@@ -838,6 +838,23 @@ async def system_status():
     except Exception:
         status["ollama"]["running"] = []
     
+    # llama-server (GPU backend) models
+    gpu_url = os.getenv("GPU_LLAMA_URL", "http://host.docker.internal:8090")
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{gpu_url}/v1/models")
+            data = r.json().get("data", [])
+            for m in data:
+                meta = m.get("meta", {})
+                size_mb = meta.get("size", 0) // 1024 // 1024 if meta.get("size") else 0
+                status["ollama"]["running"].append({
+                    "name": f"🚀 {m['id']} (GPU)",
+                    "size_mb": size_mb,
+                    "vram_mb": size_mb,
+                })
+    except Exception:
+        pass  # llama-server not running — no problem
+    
     # ES indices
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
