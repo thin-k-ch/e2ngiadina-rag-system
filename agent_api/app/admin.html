@@ -126,6 +126,28 @@
         </div>
       </div>
 
+      <!-- GPU Model Selector -->
+      <div class="card md:col-span-2">
+        <div class="section-title">🚀 GPU-Modell (Antwort)</div>
+        <p class="text-sm text-slate-400 mb-4">Das grosse Modell auf der GPU (llama-server). Wird für alle Antworten und Analysen verwendet.</p>
+        <div class="grid md:grid-cols-3 gap-3 mb-4" id="gpu-model-cards"></div>
+        <div id="gpu-switch-status" class="hidden p-3 rounded-lg border border-blue-600/30 bg-blue-950/20 mb-4">
+          <div class="flex items-center gap-2">
+            <div class="spinner"></div>
+            <span class="text-sm text-blue-300" id="gpu-switch-msg">Modell wird gewechselt...</span>
+          </div>
+        </div>
+        <div id="gpu-manager-offline" class="hidden p-3 rounded-lg border border-amber-600/30 bg-amber-950/20">
+          <div class="flex items-center gap-2">
+            <span class="text-lg">⚠️</span>
+            <div>
+              <span class="text-sm font-bold text-amber-300">GPU Model Manager nicht erreichbar</span>
+              <p class="text-xs text-slate-400">Starten mit: <code class="bg-slate-800 px-1.5 py-0.5 rounded text-blue-300">python3 scripts/gpu_model_manager.py</code></p>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Tenant Selection -->
       <div class="card">
         <div class="section-title">🏢 Aktiver Mandant</div>
@@ -518,6 +540,9 @@ async function loadDashboard() {
   if (activeTenant) {
     loadMemories(activeTenant.short_name);
   }
+
+  // Load GPU model selector
+  loadGpuModels();
 }
 
 // --- Switch Tenant ---
@@ -722,6 +747,88 @@ function escHtml(s) {
   const d = document.createElement('div');
   d.textContent = s;
   return d.innerHTML;
+}
+
+// --- GPU Model Manager ---
+let gpuPollInterval = null;
+
+async function loadGpuModels() {
+  const container = document.getElementById('gpu-model-cards');
+  const offlineBox = document.getElementById('gpu-manager-offline');
+  const statusBox = document.getElementById('gpu-switch-status');
+
+  const data = await api('/admin/api/gpu-models');
+  if (!data || data.error || !data.models?.length) {
+    container.innerHTML = '';
+    offlineBox.classList.remove('hidden');
+    return;
+  }
+  offlineBox.classList.add('hidden');
+
+  // Show switching indicator
+  if (data.switching) {
+    statusBox.classList.remove('hidden');
+    document.getElementById('gpu-switch-msg').textContent = 'Modell wird gewechselt — bitte warten (~30-60s)...';
+    if (!gpuPollInterval) {
+      gpuPollInterval = setInterval(loadGpuModels, 3000);
+    }
+  } else {
+    statusBox.classList.add('hidden');
+    if (gpuPollInterval) {
+      clearInterval(gpuPollInterval);
+      gpuPollInterval = null;
+    }
+  }
+
+  const typeIcons = { general: '🧠', reasoning: '💭' };
+  container.innerHTML = data.models.map(m => {
+    const isActive = m.active;
+    const icon = typeIcons[m.type] || '🤖';
+    const borderClass = isActive ? 'border-emerald-500 bg-emerald-500/10' : 'border-slate-600 hover:border-slate-500';
+    const badge = isActive
+      ? '<span class="badge badge-active">aktiv</span>'
+      : `<button class="btn btn-primary text-xs mt-2" onclick="switchGpuModel('${m.name}')">Laden</button>`;
+    return `
+      <div class="p-4 rounded-lg border-2 ${borderClass} transition-all">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-lg">${icon}</span>
+          ${isActive ? '<span class="text-emerald-400 text-xs font-bold">● AKTIV</span>' : ''}
+        </div>
+        <div class="text-sm font-bold text-white mb-1">${m.name}</div>
+        <div class="text-xs text-slate-400 mb-2">${m.description}</div>
+        <div class="flex items-center justify-between">
+          <span class="text-xs text-slate-500">${m.size_gb} GB</span>
+          ${badge}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function switchGpuModel(modelName) {
+  if (!confirm(`GPU-Modell wechseln zu "${modelName}"?\n\nDas dauert 30-60 Sekunden. Während dieser Zeit sind keine Anfragen möglich.`)) return;
+
+  const statusBox = document.getElementById('gpu-switch-status');
+  statusBox.classList.remove('hidden');
+  document.getElementById('gpu-switch-msg').textContent = `Wechsle zu ${modelName}...`;
+
+  const r = await api('/admin/api/gpu-model/switch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: modelName }),
+  });
+
+  if (r?.status === 'switching') {
+    toast(`🚀 Wechsle zu ${modelName} — bitte warten...`);
+    gpuPollInterval = setInterval(loadGpuModels, 3000);
+  } else if (r?.error) {
+    toast(`❌ ${r.error}`, false);
+    statusBox.classList.add('hidden');
+  } else {
+    toast(`✅ ${modelName} geladen`);
+    loadGpuModels();
+    loadDashboard();
+  }
 }
 
 // Init

@@ -892,6 +892,33 @@ async def delete_memory(tenant_id: str, memory_id: str):
         return {"status": "ok"}
     raise HTTPException(404, "Memory not found")
 
+# --- GPU Model Manager Proxy ---
+
+GPU_MANAGER_URL = os.getenv("GPU_MANAGER_URL", "http://host.docker.internal:8099")
+
+@app.get("/admin/api/gpu-models")
+async def gpu_models():
+    """Proxy to GPU Model Manager: list available models"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{GPU_MANAGER_URL}/models")
+            return r.json()
+    except Exception as e:
+        return {"models": [], "current": None, "switching": False, "error": str(e)}
+
+@app.post("/admin/api/gpu-model/switch")
+async def gpu_model_switch(request: Request):
+    """Proxy to GPU Model Manager: switch active model"""
+    import httpx
+    body = await request.json()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{GPU_MANAGER_URL}/switch", json=body)
+            return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
 # --- Admin HTML page ---
 
 @app.get("/admin", response_class=HTMLResponse)
